@@ -34,7 +34,7 @@ export default function ChatWindow() {
         onChange={e => setInput(e.target.value)}
         onKeyDown={e => e.key === 'Enter' && handleSend()}
         style={{ width: '100%', padding: 10, marginTop: 10 }}
-        placeholder="Ask something about the NBA CBA..."
+        placeholder="Ask something about the MLB CBA..."
       />
     </div>
   );
