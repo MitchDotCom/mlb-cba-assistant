@@ -1,9 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import ReactMarkdown from "react-markdown";
-// If you installed these, keep them; otherwise remove these two lines.
-import remarkGfm from "remark-gfm";
-import rehypeSanitize from "rehype-sanitize";
 
 export default function EmbedChat() {
   const [messages, setMessages] = useState([]);
@@ -27,6 +24,7 @@ export default function EmbedChat() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // send full convo (keeps your existing behavior)
         body: JSON.stringify({ messages: [...messages, userMessage] }),
       });
 
@@ -73,64 +71,62 @@ export default function EmbedChat() {
         />
         <style>{`
           html, body, #__next { height: 100%; margin: 0; padding: 0; }
-          :root { --page-bg: #ffe066; --ink: #222; --brand: #ffe066; --primary:#2563eb; }
-          /* Support modern mobile viewports */
+          /* prefer dynamic viewport height to kill iOS bars gap */
           .vh { height: 100vh; }
-          @supports (height: 100dvh) { .vh { height: 100dvh; } }
-          @supports (height: 100svh) { .vh { height: 100svh; } }
-
-          /* Mobile: make card square-edged (no outer rounding), full-bleed */
-          @media (max-width: 600px) {
-            .mlb-cba-chat-card {
-              width: 100vw !important;
+          @supports (height: 100dvh) {
+            .vh { height: 100dvh; }
+          }
+          @media (max-width: 640px) {
+            .card {
               max-width: 100vw !important;
-              border-radius: 0 !important;
               border-left: none !important;
               border-right: none !important;
               box-shadow: none !important;
             }
           }
-          a { color: var(--primary); }
+          a { color: #2563eb; }
         `}</style>
       </Head>
 
+      {/* FULL-BLEED BACKGROUND */}
       <div
+        className="vh"
         style={{
-          background: "var(--page-bg)",
+          background: "#ffe066",
           fontFamily: "'Instrument Sans', sans-serif",
-          minHeight: "100vh",
           width: "100vw",
           boxSizing: "border-box",
+          display: "flex",
+          justifyContent: "center",
         }}
       >
+        {/* CARD */}
         <div
-          className="mlb-cba-chat-card vh"
+          className="card vh"
           style={{
             background: "#fff",
             width: "100vw",
-            maxWidth: 480,
+            maxWidth: 520,
             margin: "0 auto",
-            borderRadius: 16,            // card owns the rounding
-            overflow: "hidden",          // clip children so no white arcs show
-            boxShadow: "0 0 10px rgba(0,0,0,0.1)",
+            borderRadius: 0,                 // no curves -> no white gaps
+            boxShadow: "0 2px 24px rgba(0,0,0,0.10)",
             display: "flex",
             flexDirection: "column",
-            border: "3px solid var(--ink)",
-            minHeight: 400,
+            border: "3px solid #222",
             boxSizing: "border-box",
           }}
         >
-          {/* HEADER (no radius here) */}
+          {/* HEADER (no rounded corners) */}
           <div
             style={{
-              background: "var(--ink)",
-              color: "var(--brand)",
+              background: "#222",
+              color: "#ffe066",
               padding: "10px 0 6px 0",
               textAlign: "center",
               fontWeight: 700,
               fontSize: "clamp(1.05rem, 2vw, 1.1rem)",
               letterSpacing: "0.3px",
-              borderBottom: "2px solid var(--ink)",
+              borderBottom: "2px solid #222",
               flexShrink: 0,
             }}
           >
@@ -166,8 +162,8 @@ export default function EmbedChat() {
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{
-                  background: "var(--ink)",
-                  color: "var(--brand)",
+                  background: "#222",
+                  color: "#ffe066",
                   border: "none",
                   borderRadius: 8,
                   padding: "8px 18px",
@@ -206,23 +202,17 @@ export default function EmbedChat() {
                 key={i}
                 style={{
                   alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
-                  background: msg.role === "user" ? "var(--primary)" : "#e5e7eb",
+                  background: msg.role === "user" ? "#2563eb" : "#e5e7eb",
                   color: msg.role === "user" ? "white" : "#111827",
                   padding: "12px 14px",
-                  borderRadius: 18,
+                  borderRadius: 12, // tighter radius to avoid “pill” gaps
                   maxWidth: "90vw",
                   fontSize: 14,
                   lineHeight: 1.4,
                   wordBreak: "break-word",
                 }}
               >
-                <ReactMarkdown
-                  // If you removed the imports, also remove these two props:
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeSanitize]}
-                >
-                  {msg.content}
-                </ReactMarkdown>
+                <ReactMarkdown>{msg.content}</ReactMarkdown>
               </div>
             ))}
             {isTyping && (
@@ -269,7 +259,7 @@ export default function EmbedChat() {
               type="submit"
               disabled={isTyping || !input.trim()}
               style={{
-                background: isTyping ? "#9ca3af" : "var(--primary)",
+                background: isTyping ? "#9ca3af" : "#2563eb",
                 color: "white",
                 border: "none",
                 padding: "10px 16px",
@@ -284,7 +274,7 @@ export default function EmbedChat() {
             </button>
           </form>
 
-          {/* FOOTER (no radius here; card clips it) */}
+          {/* FOOTER (no rounded corners) */}
           <div
             style={{
               background: "#fff",
