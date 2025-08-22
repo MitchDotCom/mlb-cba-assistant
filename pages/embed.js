@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import ReactMarkdown from "react-markdown";
+// If you installed these, keep them; otherwise remove these two lines.
+import remarkGfm from "remark-gfm";
+import rehypeSanitize from "rehype-sanitize";
 
 export default function EmbedChat() {
-  const [messages, setMessages] = useState([
-    // optional welcome message:
-    // { role: "assistant", content: "Ask me anything about the 2022 MLB CBA." }
-  ]);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState("");
@@ -24,7 +24,6 @@ export default function EmbedChat() {
     setError("");
 
     try {
-      // send FULL history so the assistant has context
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -74,7 +73,13 @@ export default function EmbedChat() {
         />
         <style>{`
           html, body, #__next { height: 100%; margin: 0; padding: 0; }
-          @supports (height: 100dvh) { .mlb-cba-chat-card { height: 100dvh !important; } }
+          :root { --page-bg: #ffe066; --ink: #222; --brand: #ffe066; --primary:#2563eb; }
+          /* Support modern mobile viewports */
+          .vh { height: 100vh; }
+          @supports (height: 100dvh) { .vh { height: 100dvh; } }
+          @supports (height: 100svh) { .vh { height: 100svh; } }
+
+          /* Mobile: make card square-edged (no outer rounding), full-bleed */
           @media (max-width: 600px) {
             .mlb-cba-chat-card {
               width: 100vw !important;
@@ -82,15 +87,16 @@ export default function EmbedChat() {
               border-radius: 0 !important;
               border-left: none !important;
               border-right: none !important;
+              box-shadow: none !important;
             }
           }
-          a { color: #2563eb; }
+          a { color: var(--primary); }
         `}</style>
       </Head>
 
       <div
         style={{
-          background: "#ffe066",
+          background: "var(--page-bg)",
           fontFamily: "'Instrument Sans', sans-serif",
           minHeight: "100vh",
           width: "100vw",
@@ -98,34 +104,33 @@ export default function EmbedChat() {
         }}
       >
         <div
-          className="mlb-cba-chat-card"
+          className="mlb-cba-chat-card vh"
           style={{
             background: "#fff",
             width: "100vw",
             maxWidth: 480,
             margin: "0 auto",
-            borderRadius: 0,
+            borderRadius: 16,            // card owns the rounding
+            overflow: "hidden",          // clip children so no white arcs show
             boxShadow: "0 0 10px rgba(0,0,0,0.1)",
             display: "flex",
             flexDirection: "column",
-            border: "3px solid #222",
-            height: "100vh",
+            border: "3px solid var(--ink)",
             minHeight: 400,
             boxSizing: "border-box",
           }}
         >
-          {/* HEADER */}
+          {/* HEADER (no radius here) */}
           <div
             style={{
-              background: "#222",
-              color: "#ffe066",
+              background: "var(--ink)",
+              color: "var(--brand)",
               padding: "10px 0 6px 0",
               textAlign: "center",
-              borderRadius: "9px 9px 0 0",
               fontWeight: 700,
               fontSize: "clamp(1.05rem, 2vw, 1.1rem)",
               letterSpacing: "0.3px",
-              borderBottom: "2px solid #222",
+              borderBottom: "2px solid var(--ink)",
               flexShrink: 0,
             }}
           >
@@ -161,8 +166,8 @@ export default function EmbedChat() {
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{
-                  background: "#222",
-                  color: "#ffe066",
+                  background: "var(--ink)",
+                  color: "var(--brand)",
                   border: "none",
                   borderRadius: 8,
                   padding: "8px 18px",
@@ -201,7 +206,7 @@ export default function EmbedChat() {
                 key={i}
                 style={{
                   alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
-                  background: msg.role === "user" ? "#2563eb" : "#e5e7eb",
+                  background: msg.role === "user" ? "var(--primary)" : "#e5e7eb",
                   color: msg.role === "user" ? "white" : "#111827",
                   padding: "12px 14px",
                   borderRadius: 18,
@@ -211,7 +216,13 @@ export default function EmbedChat() {
                   wordBreak: "break-word",
                 }}
               >
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                <ReactMarkdown
+                  // If you removed the imports, also remove these two props:
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeSanitize]}
+                >
+                  {msg.content}
+                </ReactMarkdown>
               </div>
             ))}
             {isTyping && (
@@ -258,7 +269,7 @@ export default function EmbedChat() {
               type="submit"
               disabled={isTyping || !input.trim()}
               style={{
-                background: isTyping ? "#9ca3af" : "#2563eb",
+                background: isTyping ? "#9ca3af" : "var(--primary)",
                 color: "white",
                 border: "none",
                 padding: "10px 16px",
@@ -273,7 +284,7 @@ export default function EmbedChat() {
             </button>
           </form>
 
-          {/* FOOTER */}
+          {/* FOOTER (no radius here; card clips it) */}
           <div
             style={{
               background: "#fff",
@@ -282,7 +293,7 @@ export default function EmbedChat() {
               textAlign: "center",
               padding: "7px 0 9px 0",
               borderTop: "1px solid #f3e0a8",
-              wordBreak: "word-break",
+              wordBreak: "break-word",
               flexShrink: 0,
             }}
           >
