@@ -42,7 +42,7 @@ export default function EmbedChat() {
   return (
     <>
       <Head>
-        <title>NBA CBA Assistant</title>
+        <title>MLB CBA Assistant</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link
           href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;700&display=swap"
@@ -55,12 +55,12 @@ export default function EmbedChat() {
             padding: 0;
           }
           @supports (height: 100dvh) {
-            .nba-cba-chat-card {
+            .mlb-cba-chat-card {
               height: 100dvh !important;
             }
           }
           @media (max-width: 600px) {
-            .nba-cba-chat-card {
+            .mlb-cba-chat-card {
               width: 100vw !important;
               max-width: 100vw !important;
               border-radius: 0 !important;
@@ -82,7 +82,7 @@ export default function EmbedChat() {
         }}
       >
         <div
-          className="nba-cba-chat-card"
+          className="mlb-cba-chat-card"
           style={{
             background: "#fff",
             width: "100vw",
@@ -113,7 +113,7 @@ export default function EmbedChat() {
               flexShrink: 0,
             }}
           >
-            NBA CBA Assistant
+            MLB CBA Assistant
             <div
               style={{
                 fontWeight: 400,
@@ -139,7 +139,7 @@ export default function EmbedChat() {
               flexShrink: 0,
             }}
           >
-            <b>Ask anything about the NBA CBA, salary cap, or contract rules.</b>
+            <b>Ask anything about the 2022 MLB CBA.</b>
             <div style={{ marginTop: 10 }}>
               <a
                 href="https://mitchleblanc.xyz"
@@ -235,7 +235,7 @@ export default function EmbedChat() {
               }}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask me about the NBA CBA…"
+              placeholder="Ask me about the MLB CBA…"
             />
             <button
               type="submit"
