@@ -1,42 +1,68 @@
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeSanitize from "rehype-sanitize";
 
 export default function EmbedChat() {
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState([
+    // optional welcome message:
+    // { role: "assistant", content: "Ask me anything about the 2022 MLB CBA." }
+  ]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [error, setError] = useState("");
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, isTyping]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!input.trim()) return;
-
-    const userMessage = { role: "user", content: input };
+  const submit = async (text) => {
+    const userMessage = { role: "user", content: text };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setIsTyping(true);
+    setError("");
 
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: [userMessage],
-      }),
-    });
+    try {
+      // send FULL history so the assistant has context
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: [...messages, userMessage] }),
+      });
 
-    const data = await res.json();
-    const assistantMessage = {
-      role: "assistant",
-      content: data.result || "No response from assistant.",
-    };
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(body || `HTTP ${res.status}`);
+      }
 
-    setMessages((prev) => [...prev, assistantMessage]);
-    setIsTyping(false);
+      const data = await res.json();
+      const assistantMessage = {
+        role: "assistant",
+        content: data.result || "No response from assistant.",
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+    } catch (e) {
+      setError("Sorry—something went wrong. Please try again.");
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!input.trim() || isTyping) return;
+    submit(input.trim());
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (!input.trim() || isTyping) return;
+      submit(input.trim());
+    }
   };
 
   return (
@@ -49,16 +75,8 @@ export default function EmbedChat() {
           rel="stylesheet"
         />
         <style>{`
-          html, body, #__next {
-            height: 100%;
-            margin: 0;
-            padding: 0;
-          }
-          @supports (height: 100dvh) {
-            .mlb-cba-chat-card {
-              height: 100dvh !important;
-            }
-          }
+          html, body, #__next { height: 100%; margin: 0; padding: 0; }
+          @supports (height: 100dvh) { .mlb-cba-chat-card { height: 100dvh !important; } }
           @media (max-width: 600px) {
             .mlb-cba-chat-card {
               width: 100vw !important;
@@ -68,14 +86,14 @@ export default function EmbedChat() {
               border-right: none !important;
             }
           }
+          a { color: #2563eb; }
         `}</style>
       </Head>
+
       <div
         style={{
           background: "#ffe066",
           fontFamily: "'Instrument Sans', sans-serif",
-          margin: 0,
-          padding: 0,
           minHeight: "100vh",
           width: "100vw",
           boxSizing: "border-box",
@@ -93,7 +111,7 @@ export default function EmbedChat() {
             display: "flex",
             flexDirection: "column",
             border: "3px solid #222",
-            height: "100vh", // will be overridden by 100dvh if supported
+            height: "100vh",
             minHeight: 400,
             boxSizing: "border-box",
           }}
@@ -120,14 +138,13 @@ export default function EmbedChat() {
                 fontSize: "clamp(0.9rem, 1.8vw, 0.98rem)",
                 color: "#fff7cc",
                 marginTop: 1,
-                letterSpacing: 0,
               }}
             >
               by Mitch Leblanc
             </div>
           </div>
 
-          {/* WELCOME & BACK TO SITE */}
+          {/* NOTICE + BACK */}
           <div
             style={{
               background: "#fff8dc",
@@ -156,7 +173,6 @@ export default function EmbedChat() {
                   fontSize: "clamp(0.95rem, 2vw, 1rem)",
                   marginTop: 8,
                   display: "inline-block",
-                  transition: "background 0.15s",
                   width: "100%",
                   maxWidth: 250,
                 }}
@@ -168,6 +184,9 @@ export default function EmbedChat() {
 
           {/* CHAT WINDOW */}
           <div
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions"
             style={{
               flex: 1,
               minHeight: 0,
@@ -194,19 +213,21 @@ export default function EmbedChat() {
                   wordBreak: "break-word",
                 }}
               >
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeSanitize]}
+                >
+                  {msg.content}
+                </ReactMarkdown>
               </div>
             ))}
             {isTyping && (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "#6b7280",
-                  fontStyle: "italic",
-                }}
-              >
+              <div style={{ fontSize: 12, color: "#6b7280", fontStyle: "italic" }}>
                 Assistant is reviewing the CBA… One moment.
               </div>
+            )}
+            {error && (
+              <div style={{ fontSize: 12, color: "#b91c1c" }}>{error}</div>
             )}
             <div ref={messagesEndRef} />
           </div>
@@ -223,13 +244,16 @@ export default function EmbedChat() {
               flexShrink: 0,
             }}
           >
-            <input
+            <textarea
+              rows={1}
+              onKeyDown={handleKeyDown}
               style={{
                 flex: 1,
                 padding: "10px 14px",
                 border: "1px solid #d1d5db",
                 borderRadius: 8,
                 fontSize: 14,
+                resize: "none",
                 width: 0,
                 minWidth: 0,
               }}
@@ -239,15 +263,18 @@ export default function EmbedChat() {
             />
             <button
               type="submit"
+              disabled={isTyping || !input.trim()}
               style={{
-                background: "#2563eb",
+                background: isTyping ? "#9ca3af" : "#2563eb",
                 color: "white",
                 border: "none",
                 padding: "10px 16px",
                 borderRadius: 8,
-                cursor: "pointer",
+                cursor: isTyping ? "not-allowed" : "pointer",
                 fontSize: "1rem",
+                opacity: isTyping ? 0.8 : 1,
               }}
+              aria-disabled={isTyping}
             >
               Send
             </button>
@@ -261,7 +288,6 @@ export default function EmbedChat() {
               fontSize: "clamp(0.86rem, 1.5vw, 0.93rem)",
               textAlign: "center",
               padding: "7px 0 9px 0",
-              borderRadius: "0 0 12px 12px",
               borderTop: "1px solid #f3e0a8",
               wordBreak: "break-word",
               flexShrink: 0,
@@ -269,7 +295,7 @@ export default function EmbedChat() {
           >
             &copy; {new Date().getFullYear()} Mitch Leblanc.<br />
             <span style={{ color: "#aaa" }}>
-              For informational purposes only. Always consult the official NBA CBA for legal certainty.
+              For informational purposes only. Always consult the official <b>MLB</b> CBA for legal certainty.
             </span>
           </div>
         </div>
