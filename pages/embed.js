@@ -1,8 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeSanitize from "rehype-sanitize";
 
 export default function EmbedChat() {
   const [messages, setMessages] = useState([
@@ -213,12 +211,7 @@ export default function EmbedChat() {
                   wordBreak: "break-word",
                 }}
               >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeSanitize]}
-                >
-                  {msg.content}
-                </ReactMarkdown>
+                <ReactMarkdown>{msg.content}</ReactMarkdown>
               </div>
             ))}
             {isTyping && (
@@ -289,7 +282,7 @@ export default function EmbedChat() {
               textAlign: "center",
               padding: "7px 0 9px 0",
               borderTop: "1px solid #f3e0a8",
-              wordBreak: "break-word",
+              wordBreak: "word-break",
               flexShrink: 0,
             }}
           >
