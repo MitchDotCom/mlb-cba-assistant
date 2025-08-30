@@ -1,6 +1,7 @@
 {
   "name": "mlb-cba-assistant",
   "version": "1.0.0",
+  "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,6 +11,9 @@
     "next": "13.4.0",
     "react": "18.2.0",
     "react-dom": "18.2.0",
-    "react-markdown": "^9.0.0"
+    "openai": "^4.53.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
