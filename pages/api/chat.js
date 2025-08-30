@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ result: 'POST only' });
 
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // MLB Assistant ID
+  const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // your MLB Assistant
 
   const messages = req.body?.messages || [];
   if (!messages.length) {
@@ -41,7 +41,7 @@ export default async function handler(req, res) {
     }),
   });
 
-  // 3) Run the Assistant with a tiny instructions override to ensure quotes
+  // 3) Run the Assistant with a tiny instruction to force short quotes at the end
   const override =
     "After your normal output (Summary, How it works, Edge cases, AI interpretation, Citation), " +
     "append a final section titled '—— Verification ——' with 1–3 verbatim quotes (≤ 40 words each) " +
@@ -65,7 +65,7 @@ export default async function handler(req, res) {
   // 4) Poll until run completes
   let status = run.status;
   let retries = 0;
-  const maxRetries = 20; // ~30s at 1.5s interval
+  const maxRetries = 20;
   while ((status === "queued" || status === "in_progress") && retries < maxRetries) {
     await new Promise((r) => setTimeout(r, 1500));
     const statusRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/runs/${run.id}`, {
@@ -83,7 +83,7 @@ export default async function handler(req, res) {
     return res.status(500).json({ result: "Assistant run failed or timed out." });
   }
 
-  // 5) Read the latest assistant message
+  // 5) Read the assistant message
   const messagesRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/messages`, {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
@@ -91,19 +91,19 @@ export default async function handler(req, res) {
     },
   });
   const messageData = await messagesRes.json();
-  // find newest assistant message
   const assistantReply = (messageData?.data || []).find((m) => m.role === "assistant");
+
   const raw =
     assistantReply?.content?.[0]?.text?.value?.trim() ||
     "The assistant returned an empty response.";
 
-  // 6) Attach PDF page links + confidence (safe fallback if anything fails)
+  // 6) Attach PDF page links + one Confidence line
   let finalText = raw;
   try {
     const { text } = await attachVerification(raw, '/mlb/MLB_CBA_2022.pdf');
     finalText = text;
   } catch (e) {
-    console.error('attachVerification failed:', e);
+    console.error('attachVerification error', e);
   }
 
   return res.status(200).json({ result: finalText });
