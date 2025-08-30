@@ -1,8 +1,6 @@
-// pages/embed.js
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 export default function EmbedChat() {
   const [messages, setMessages] = useState([]);
@@ -214,17 +212,8 @@ export default function EmbedChat() {
                   wordBreak: "break-word",
                 }}
               >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  linkTarget="_blank"
-                  components={{
-                    a: ({ node, ...props }) => (
-                      <a {...props} target="_blank" rel="noopener noreferrer" />
-                    ),
-                  }}
-                >
-                  {msg.content}
-                </ReactMarkdown>
+                {/* CHANGED: open links in a new tab */}
+                <ReactMarkdown linkTarget="_blank">{msg.content}</ReactMarkdown>
               </div>
             ))}
             {isTyping && (
@@ -301,7 +290,7 @@ export default function EmbedChat() {
           >
             &copy; {new Date().getFullYear()} Mitch Leblanc.<br />
             <span style={{ color: "#aaa" }}>
-              For informational purposes only. Always consult the official <b>MLB CBA</b> for legal certainty.
+              For informational purposes only. Always consult the official <b>MLB</b> CBA for legal certainty.
             </span>
           </div>
         </div>
