@@ -161,8 +161,7 @@ Exact citations required.
 Clarity > verbosity
 `;
 
-// We *append* a strict verification/output template and a page-map helper.
-// No env vars. Everything is self-contained.
+// Verification/page-link block appended after the main answer
 const VERIFY_TEMPLATE = (pdfUrl) => `
 Append the following block exactly after your normal answer:
 
