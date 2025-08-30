@@ -35,10 +35,7 @@ export default async function handler(req, res) {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "OpenAI-Beta": "assistants=v2"
     },
-    body: JSON.stringify({
-      role: "user",
-      content: userText
-    }),
+    body: JSON.stringify({ role: "user", content: userText }),
   });
 
   // 3) Run the Assistant with a tiny instruction to force short quotes at the end
@@ -92,15 +89,19 @@ export default async function handler(req, res) {
   });
   const messageData = await messagesRes.json();
   const assistantReply = (messageData?.data || []).find((m) => m.role === "assistant");
-
   const raw =
     assistantReply?.content?.[0]?.text?.value?.trim() ||
     "The assistant returned an empty response.";
 
-  // 6) Attach PDF page links + one Confidence line
+  // 6) Build the absolute origin for HTTP fallback (e.g., https://mlb.mitchleblanc.xyz)
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'mlb.mitchleblanc.xyz';
+  const proto = (req.headers['x-forwarded-proto'] || 'https');
+  const origin = `${proto}://${host}`;
+
+  // 7) Attach PDF page links + one Confidence line
   let finalText = raw;
   try {
-    const { text } = await attachVerification(raw, '/mlb/MLB_CBA_2022.pdf');
+    const { text } = await attachVerification(raw, '/mlb/MLB_CBA_2022.pdf', origin);
     finalText = text;
   } catch (e) {
     console.error('attachVerification error', e);
