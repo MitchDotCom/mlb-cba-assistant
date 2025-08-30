@@ -1,176 +1,132 @@
-// lib/pdfIndex.js
-// Server-only PDF text linker for the Verification block.
-// - Dynamically imports pdfjs-dist (ESM) so Next/Vercel are happy
-// - Tries reading the PDF from /public; if not found, fetches it over HTTP
-// - Adds page links when found, otherwise adds a "Find in PDF" search link
-// - No worker needed on Node
+// pages/api/chat.js
+const { attachVerification } = require('../../lib/pdfIndex');
 
-const fs = require('fs');
-const path = require('path');
-
-let _pages = null;
-
-// Dynamically import pdfjs (ESM) in a way that works on Vercel/Next
-async function getPdfjs() {
+export default async function handler(req, res) {
+  // Always answer 200 with a string so the UI never shows "Something went wrong"
   try {
-    // Preferred public build entry
-    const mod = await import('pdfjs-dist/build/pdf');
-    return { getDocument: mod.getDocument || mod.default?.getDocument };
-  } catch {
-    // Fallback to package root
-    const mod2 = await import('pdfjs-dist');
-    return { getDocument: mod2.getDocument || mod2.default?.getDocument };
-  }
-}
-
-// Normalize text for robust matching
-function norm(s) {
-  return s
-    .toLowerCase()
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/[^\p{L}\p{N}\s"']/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// Load the PDF bytes from disk or HTTP
-async function loadPdfBytes(pdfPublicPath, origin) {
-  // 1) Try reading from the deployed /public folder
-  const diskPath = path.join(process.cwd(), 'public', pdfPublicPath.replace(/^\//, ''));
-  if (fs.existsSync(diskPath)) {
-    console.log('[pdfIndex] using DISK path', diskPath);
-    return fs.readFileSync(diskPath);
-  }
-
-  // 2) Fallback: fetch over HTTP (works on previews + prod)
-  const base =
-    origin ||
-    process.env.SELF_BASE_URL || // optional env override, e.g. https://mlb.mitchleblanc.xyz
-    `https://${process.env.VERCEL_URL || 'mlb.mitchleblanc.xyz'}`;
-
-  const url = `${base}${pdfPublicPath}`;
-  console.log('[pdfIndex] using HTTP fetch', url);
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
-  const ab = await resp.arrayBuffer();
-  return Buffer.from(ab);
-}
-
-// Read + cache the PDF as normalized text per page
-async function loadPdf(publishedHref, origin) {
-  if (_pages) return _pages;
-
-  const data = await loadPdfBytes(publishedHref, origin);
-  console.log('[pdfIndex] loaded PDF bytes:', typeof data, Buffer.isBuffer(data) ? data.length : 'n/a');
-
-  const { getDocument } = await getPdfjs();
-  if (typeof getDocument !== 'function') throw new Error('pdfjs getDocument() unavailable');
-
-  const loadingTask = getDocument({ data });
-  const doc = await loadingTask.promise;
-
-  const pages = [];
-  for (let i = 1; i <= doc.numPages; i++) {
-    const page = await doc.getPage(i);
-    const tc = await page.getTextContent();
-    const text = tc.items.map((it) => it.str).join(' ');
-    pages.push(norm(text));
-  }
-  _pages = pages;
-  return _pages;
-}
-
-// Scoring: exact substring wins; else token overlap ratio
-function score(snippet, page) {
-  if (!snippet) return 0;
-  if (page.includes(snippet)) return 1.0;
-  const toks = snippet.split(' ').filter((w) => w.length > 2);
-  if (!toks.length) return 0;
-  let hit = 0;
-  for (const w of toks) if (page.includes(` ${w} `)) hit++;
-  return hit / toks.length;
-}
-
-function confidence(x) {
-  if (x >= 0.98) return 'High';
-  if (x >= 0.80) return 'Medium';
-  return 'Low';
-}
-
-// Find best page for one short quote (<= 40 words)
-async function findBestPage(rawQuote, publishedHref, origin) {
-  const pages = await loadPdf(publishedHref, origin);
-  const trimmed = rawQuote.split(/\s+/).slice(0, 40).join(' ');
-  const sn = norm(trimmed);
-
-  let best = { idx: -1, score: 0 };
-  for (let i = 0; i < pages.length; i++) {
-    const s = score(sn, pages[i]);
-    if (s > best.score) best = { idx: i, score: s };
-    if (best.score === 1.0) break;
-  }
-
-  return {
-    page: best.idx >= 0 ? best.idx + 1 : null,
-    quote: trimmed,
-    score: best.score,
-    confidence: confidence(best.score),
-  };
-}
-
-// Replace the trailing "Verification" block with page links (or search link) + one confidence line
-async function attachVerification(answerText, pdfHref = '/mlb/MLB_CBA_2022.pdf', origin) {
-  // Find the Verification section the Assistant appended
-  const m = answerText.match(/[-–—]{2,}\s*Verification\s*[-–—]{2,}([\s\S]*)$/i);
-  if (!m) return { text: answerText, changed: false };
-
-  const tail = m[1];
-
-  // Extract up to 3 quotes (supports curly or straight quotes)
-  const quotes = [];
-  for (const rx of [/“([^”]{3,400})”/g, /"([^"]{3,400})"/g]) {
-    let q;
-    while ((q = rx.exec(tail)) && quotes.length < 3) {
-      const found = q[1].trim();
-      if (found) quotes.push(found);
+    if (req.method !== 'POST') {
+      return res.status(200).json({ result: 'Use POST with a question.' });
     }
-    if (quotes.length) break;
-  }
-  if (!quotes.length) return { text: answerText, changed: false };
 
-  // Find pages (with hard fail-safe)
-  const found = [];
-  for (const q of quotes) {
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return res.status(200).json({ result: 'Missing OPENAI_API_KEY on the server.' });
+    }
+
+    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // your MLB Assistant
+
+    const messages = req.body?.messages || [];
+    if (!messages.length) {
+      return res.status(200).json({ result: 'No question provided.' });
+    }
+
+    const userText = messages[messages.length - 1].content;
+
+    // 1) Create thread
+    const threadRes = await fetch("https://api.openai.com/v1/threads", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
+      }
+    });
+    const thread = await threadRes.json();
+    if (!thread?.id) {
+      console.error('[chat] Failed to create thread:', thread);
+      return res.status(200).json({ result: 'Assistant error: could not start a session.' });
+    }
+
+    // 2) Add the latest user message
+    await fetch(`https://api.openai.com/v1/threads/${thread.id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
+      },
+      body: JSON.stringify({ role: "user", content: userText }),
+    });
+
+    // 3) Run the Assistant with a tiny instruction to force short quotes at the end
+    const override =
+      "After your normal output (Summary, How it works, Edge cases, AI interpretation, Citation), " +
+      "append a final section titled '—— Verification ——' with 1–3 verbatim quotes (≤ 40 words each) " +
+      "from the exact CBA text you used. Do NOT include page numbers or links—the app will add them. " +
+      "Use MLB meanings for acronyms by default (e.g., DFA = Designated for Assignment).";
+
+    const runRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/runs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
+      },
+      body: JSON.stringify({ assistant_id, instructions: override }),
+    });
+    const run = await runRes.json();
+    if (!run?.id) {
+      console.error('[chat] Failed to start run:', run);
+      return res.status(200).json({ result: 'Assistant error: could not generate a reply.' });
+    }
+
+    // 4) Poll until run completes (with cap)
+    let status = run.status;
+    let tries = 0;
+    const maxTries = 24; // ~36s
+    while ((status === "queued" || status === "in_progress") && tries < maxTries) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const statusRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/runs/${run.id}`, {
+        headers: {
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2"
+        },
+      });
+      const statusData = await statusRes.json();
+      status = statusData?.status;
+      tries++;
+    }
+
+    if (status !== "completed") {
+      console.error('[chat] Run status:', status);
+      return res.status(200).json({ result: 'Assistant error: timed out preparing the reply.' });
+    }
+
+    // 5) Read the latest assistant message
+    const messagesRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/messages`, {
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
+      },
+    });
+    const messageData = await messagesRes.json();
+    const assistantReply = (messageData?.data || []).find((m) => m.role === "assistant");
+    const raw =
+      assistantReply?.content?.[0]?.text?.value?.trim() ||
+      "The assistant returned an empty response.";
+
+    // 6) Build origin for PDF HTTP fallback (works in preview/prod)
+    const host = req.headers['x-forwarded-host'] || req.headers.host || 'mlb.mitchleblanc.xyz';
+    const proto = (req.headers['x-forwarded-proto'] || 'https');
+    const origin = `${proto}://${host}`;
+    console.log('[attachVerification] origin=', origin);
+
+    // 7) Attach PDF page links + one Confidence line (never throw)
+    let finalText = raw;
     try {
-      found.push(await findBestPage(q, pdfHref, origin));
+      const result = await attachVerification(raw, '/mlb/MLB_CBA_2022.pdf', origin);
+      console.log('[attachVerification] changed=', result.changed);
+      finalText = result.text;
     } catch (e) {
-      console.error('[pdfIndex] findBestPage error:', e?.message || e);
-      found.push({ page: null, quote: q, score: 0, confidence: 'Low' });
+      console.error('[attachVerification] ERROR:', e?.message || e);
+      // keep finalText = raw
     }
+
+    return res.status(200).json({ result: finalText });
+  } catch (e) {
+    console.error('[chat] FATAL:', e?.message || e);
+    return res.status(200).json({
+      result: 'Server error preparing the reply. Please try again.'
+    });
   }
-
-  // Build lines: prefer page links; always include a working search link if page not found
-  const lines = found.map((r) => {
-    const searchParam = `#search=${encodeURIComponent(r.quote)}`;
-    if (r.page) {
-      return `• Page ${r.page} — [Open page](${pdfHref}#page=${r.page}) — “${r.quote}”`;
-    }
-    return `• [Find in PDF](${pdfHref}${searchParam}) — “${r.quote}”`;
-  });
-
-  // Overall confidence = the lowest of the quotes
-  const rank = { High: 3, Medium: 2, Low: 1 };
-  const minRank = Math.min(...found.map((r) => rank[r.confidence] ?? 1));
-  const overall = Object.entries(rank).find(([, v]) => v === minRank)?.[0] || 'Low';
-  lines.push(`• Confidence: ${overall}`);
-
-  const rebuilt = answerText.replace(
-    /([-–—]{2,}\s*Verification\s*[-–—]{2,})([\s\S]*)$/i,
-    (_, hdr) => `${hdr}\n${lines.join('\n')}\n`
-  );
-
-  return { text: rebuilt, changed: true };
 }
-
-module.exports = { attachVerification, findBestPage };
