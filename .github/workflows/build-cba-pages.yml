@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    # Avoid infinite loops when this workflow's own commit pushes
+    # prevent infinite loops on our own commit
     if: ${{ !contains(github.event.head_commit.message, 'Auto-generate cba_pages.json') }}
     runs-on: ubuntu-latest
     steps:
@@ -33,14 +33,24 @@ jobs:
       - name: Build cba_pages.json
         run: node scripts/build_cba_pages.mjs
 
+      - name: Show output
+        run: |
+          ls -lah public/mlb || true
+          echo "Preview (first 500 chars):"
+          head -c 500 public/mlb/cba_pages.json || true
+          echo ""
+
+      - name: Upload cba_pages.json artifact (for visibility)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cba_pages.json
+          path: public/mlb/cba_pages.json
+          if-no-files-found: error
+
       - name: Commit result
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- public/mlb/cba_pages.json; then
-            echo "No changes to cba_pages.json"
-          else
-            git add public/mlb/cba_pages.json
-            git commit -m "Auto-generate cba_pages.json"
-            git push
-          fi
+          git add -f public/mlb/cba_pages.json
+          git commit -m "Auto-generate cba_pages.json" || echo "Nothing to commit"
+          git push
