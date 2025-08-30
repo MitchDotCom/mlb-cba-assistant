@@ -301,7 +301,7 @@ export default function EmbedChat() {
           >
             &copy; {new Date().getFullYear()} Mitch Leblanc.<br />
             <span style={{ color: "#aaa" }}>
-              For informational purposes only. Always consult the official <b>MLB</b> CBA for legal certainty.
+              For informational purposes only. Always consult the official <b>MLB CBA</b> for legal certainty.
             </span>
           </div>
         </div>
