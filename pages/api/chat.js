@@ -1,14 +1,102 @@
 // pages/api/chat.js
-// Keeps your UI contract exactly the same:
-//  - accepts { messages: [...] } from the client
-//  - returns { result: "<assistant text>" }
-//
-// What this adds:
-//  - A strict output template enforced at run-time (no fluff).
-//  - "Summary → CBA text (quotes) → AI interpretation → Citation → Verification".
-//  - Hard caps on length; ban filler phrases.
-//  - PAGE_MAP JSON passed in so links are precise.
-//  - Server fix to ensure the PDF link is always clickable.
+// Keeps your /embed contract: accepts { messages }, returns { result }.
+// Enforces your clean structure and builds correct PDF page links from page_map.json.
+// No "raw" URLs, no "collapsed", no parenthetical hints in output.
+
+function extractCitationsBlock(text) {
+  // Grabs the "Citation:" line and returns it
+  const m = text.match(/(^|\n)Citation:\s*(.+)\n/i);
+  return m ? m[2].trim() : "";
+}
+
+function parseCodesFromCitation(citationLine) {
+  // Tries to pull normalized codes like "XXIII.E.2" from a line such as:
+  // "CBA (2022–2026), Article XXIII(E)(2) and Appendix K."
+  // Returns an array of candidate codes: ["XXIII.E.2", "XXIII", ...]
+  const out = new Set();
+
+  // Article patterns like XXIII(E)(2)(b)...
+  const articleMatches = citationLine.match(/Article\s+([IVXLCDM]+)(\([^)]*\))*/gi) || [];
+  for (const a of articleMatches) {
+    // Pull roman
+    const art = (a.match(/Article\s+([IVXLCDM]+)/i) || [])[1];
+    if (!art) continue;
+    // Pull nested parens e.g. (E)(2)(b)
+    const nest = Array.from(a.matchAll(/\(([A-Za-z0-9]+)\)/g)).map(m => m[1]);
+    let code = art.toUpperCase();
+    for (const n of nest) {
+      // Normalize like E or 2 or b -> .E / .2 / .b (keep case)
+      code += "." + n;
+    }
+    out.add(code);
+    // Also add plain Article as fallback
+    out.add(art.toUpperCase());
+  }
+
+  // Appendices like "Appendix K" or "Appendix B"
+  const appMatches = citationLine.match(/Appendix\s+([A-Z])/gi) || [];
+  for (const ap of appMatches) {
+    const letter = (ap.match(/Appendix\s+([A-Z])/i) || [])[1];
+    if (letter) out.add(`Appendix ${letter.toUpperCase()}`);
+  }
+
+  return Array.from(out);
+}
+
+function findPagesFromCodes(codes, pageMap) {
+  // pageMap keys look like "XXIII.E.2 (CBT — AAV)" or "Appendix B (CBT Tables)"
+  // We match by prefix before the space.
+  const pages = [];
+  const keys = Object.keys(pageMap || {});
+  for (const code of codes) {
+    // exact or prefix (before first space or paren)
+    for (const k of keys) {
+      const head = k.split(" ")[0]; // "XXIII.E.2"
+      if (head.toLowerCase() === code.toLowerCase()) {
+        const p = pageMap[k];
+        if (Number.isInteger(p)) pages.push({ code: head, page: p });
+      }
+    }
+  }
+  // Dedup by page
+  const seen = new Set();
+  return pages.filter(({ page }) => (seen.has(page) ? false : (seen.add(page), true)));
+}
+
+function rebuildVerification(text, pages, pdfUrl) {
+  // Always render a clean block with only bullets + confidence.
+  // If no pages are known, we keep whatever the model wrote (but we scrub "Raw").
+  const confMatch = text.match(/Confidence:\s*(High|Medium|Low)/i);
+  const confidence = confMatch ? confMatch[1] : null;
+
+  if (!pages.length && !confidence) {
+    // nothing we can deterministically improve
+    return text.replace(/Raw:\s*https?:\/\/\S+/gi, "").replace(/\n{3,}/g, "\n\n");
+  }
+
+  const bullets = pages
+    .map(({ page }) => `• Page ${page} — [Open page](${pdfUrl}#page=${page})`)
+    .join("\n");
+
+  const confLine = confidence ? `\n• Confidence: ${confidence}` : "";
+
+  // Replace the entire Verification block if present, else append one.
+  const verRe = /(——\s*Verification\s*——)([\s\S]*?)(?=\n\S|\s*$)/i;
+  const cleanBlock = `—— Verification ——\n${bullets}${confLine}`;
+  if (verRe.test(text)) {
+    return text
+      .replace(verRe, cleanBlock)
+      .replace(/Raw:\s*https?:\/\/\S+/gi, "")
+      .replace(/\n{3,}/g, "\n\n");
+  } else {
+    return (
+      text
+        + `\n\n${cleanBlock}`
+    )
+      .replace(/Raw:\s*https?:\/\/\S+/gi, "")
+      .replace(/\n{3,}/g, "\n\n");
+  }
+}
 
 export default async function handler(req, res) {
   try {
@@ -21,28 +109,25 @@ export default async function handler(req, res) {
       return res.status(500).json({ result: "Missing OPENAI_API_KEY." });
     }
 
-    // Your existing Assistant (do not change)
-    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
+    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // your existing Assistant
 
-    // Known-good public assets
     const DOMAIN = "https://mlb-cba-assistant-git-main-mitchdotcoms-projects.vercel.app";
     const PDF_URL = `${DOMAIN}/mlb/MLB_CBA_2022.pdf`;
     const PAGE_MAP_URL = `${DOMAIN}/mlb/page_map.json`;
 
-    // Frontend messages as-is
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
     if (!messages.length) {
       return res.status(400).json({ result: "No messages provided." });
     }
 
-    // --- helpers ---
+    // Helper that throws on non-2xx
     async function ofetch(url, opts) {
       const r = await fetch(url, opts);
-      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=>"")}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(() => "")}`);
       return r.json();
     }
 
-    // 1) Create a thread
+    // Create thread
     const thread = await ofetch("https://api.openai.com/v1/threads", {
       method: "POST",
       headers: {
@@ -53,9 +138,8 @@ export default async function handler(req, res) {
       body: JSON.stringify({})
     });
     const threadId = thread.id;
-    if (!threadId) return res.status(500).json({ result: "Failed to create assistant thread." });
 
-    // 2) Add the ENTIRE conversation (user + assistant turns)
+    // Add full conversation (user + assistant)
     for (const m of messages) {
       const role = (m?.role === "user" || m?.role === "assistant") ? m.role : "user";
       const content = typeof m?.content === "string" ? m.content : "";
@@ -71,54 +155,44 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3) Fetch page_map (best-effort)
+    // Fetch page_map (authoritative for links)
     let pageMap = {};
     try {
       const pm = await fetch(PAGE_MAP_URL, { cache: "no-store" });
       if (pm.ok) pageMap = await pm.json();
-    } catch (_) {}
+    } catch {}
 
-    // 4) STRICT template (no fluff)
-    // Keeps your original Assistant rules; we append this per-run.
-    const STRICT_TEMPLATE =
-`OUTPUT FORMAT (exact order, no extra sections):
+    // Minimal, invisible run-time addendum:
+    // - keep YOUR system instructions exactly as set in the OpenAI Assistant
+    // - just force the simple output shape and ban meta directives from output
+    const RUNTIME_RULES = `
+OUTPUT SHAPE (exact headers, no meta commentary, no parenthetical hints):
 Summary:
-<Max 25 words. Plain-English one-liner. No preamble, no throat-clearing.>
+<one sentence, plain-English>
 
-CBA text (verbatim, ≤ 2 quotes, each ≤ 40 words):
-“<quote 1>”
-“<quote 2>”
+CBA text:
+“<short quote 1>”
+“<short quote 2>”
 
-AI interpretation (≤ 35 words, start with this exact disclaimer):
+AI interpretation:
 AI interpretation: This reflects how clubs or players may respond to this rule in practice. It is not part of the CBA text.
-<one tight sentence — why it matters, no speculation>
+<one tight sentence on why it matters>
 
 Citation:
-CBA (2022–2026), <exact Article/Section and Appendix if used, e.g., Article XXIII(E)(2)>.
+CBA (2022–2026), <exact Article/Section and any Appendix>.
 
 —— Verification ——
-• Open PDF: [Open page](${PDF_URL}#page=<n>)
-  Raw: ${PDF_URL}#page=<n>
+• Pages: <comma-separated page numbers from PAGE_MAP only; if unknown, leave empty>
 • Confidence: High | Medium | Low
-• Dual-confirm (required if topic ∈ {AAV/CBT, deferrals PV, buyouts, service time 172/20-day, Super Two, DFA/options/outrights}):
-  Confirmed in <Article/Section> and <Appendix/Article>.
 
-Sources (collapsed):
-• <file or section>, page <n>: <≤200 chars snippet>
-• <file or section>, page <n>: <≤200 chars snippet>
+RULES:
+• Do NOT print instructions, token limits, or parenthetical guidance in the output.
+• Do NOT print "Sources (collapsed)". Omit that section entirely.
+• Use PAGE_MAP strictly for page numbers. Do not guess pages. If unmapped, leave Pages empty.
+• Quotes MUST come from the cited Article/Appendix text.
+`.trim();
 
-CONSTRAINTS:
-• No preambles (e.g., “Certainly”, “Here’s”).
-• No restating the user question.
-• Keep total answer ≤ 180 words (excluding URLs).
-• Quotes MUST come from the cited page(s).
-• Use PAGE_MAP when present; if unknown, pick best page and allow ±1 page range in your reasoning (but do not print ranges).
-• Be concrete and legalistic; ban generic filler.`;
-
-    // 5) Verification & PAGE_MAP added to run instructions
-    const RUN_INSTRUCTIONS = `PAGE_MAP (JSON): ${JSON.stringify(pageMap)}\n\n${STRICT_TEMPLATE}`;
-
-    // 6) Start a run with appended instructions
+    // Start run (appending only the runtime rules + page_map; your base instructions stay as-is in the Assistant)
     const run = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
@@ -128,20 +202,16 @@ CONSTRAINTS:
       },
       body: JSON.stringify({
         assistant_id,
-        instructions: RUN_INSTRUCTIONS
+        instructions: `PAGE_MAP: ${JSON.stringify(pageMap)}\n\n${RUNTIME_RULES}`
       })
     });
 
-    const runId = run.id;
-    if (!runId) return res.status(500).json({ result: "Failed to start assistant run." });
-
-    // 7) Poll until complete
+    // Poll
     let status = run.status;
     let tries = 0;
-    const MAX_TRIES = 40;
-    while ((status === "queued" || status === "in_progress") && tries < MAX_TRIES) {
+    while ((status === "queued" || status === "in_progress") && tries < 40) {
       await new Promise(r => setTimeout(r, 1500));
-      const s = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
+      const s = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`, {
         headers: {
           "Authorization": `Bearer ${OPENAI_API_KEY}`,
           "OpenAI-Beta": "assistants=v2"
@@ -154,59 +224,26 @@ CONSTRAINTS:
       return res.status(500).json({ result: "Assistant run failed or timed out." });
     }
 
-    // 8) Get the latest assistant message
+    // Read assistant message
     const msgs = await ofetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
       headers: {
         "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "OpenAI-Beta": "assistants=v2"
       }
     });
-    const assistantMsg = Array.isArray(msgs?.data)
-      ? msgs.data.find((m) => m.role === "assistant")
-      : null;
+    const assistantMsg = Array.isArray(msgs?.data) ? msgs.data.find(m => m.role === "assistant") : null;
+    let text = assistantMsg?.content?.[0]?.text?.value?.trim() || "No response.";
 
-    let text =
-      assistantMsg?.content?.[0]?.text?.value?.trim() ||
-      "The assistant returned an empty response.";
+    // Build links from PAGE_MAP using the Citation line
+    const citationLine = extractCitationsBlock(text);
+    const codes = parseCodesFromCitation(citationLine);
+    const pageItems = findPagesFromCodes(codes, pageMap);
 
-    // 9) Force a clickable PDF link and remove any leftover placeholders
-    (function forceClickableLink() {
-      // Prefer an explicit pdf#page=### URL
-      let url = null;
-      const m1 = text.match(/https?:\/\/[^\s)]+\/mlb\/MLB_CBA_2022\.pdf#page=\d+/i);
-      if (m1) url = m1[0];
+    // Rewrite verification block cleanly with real links from map (no Raw, no fluff)
+    text = rebuildVerification(text, pageItems, PDF_URL);
 
-      // Fallback: Raw: URL
-      if (!url) {
-        const m2 = text.match(/Raw:\s*(https?:\/\/[^\s)]+)/i);
-        if (m2) url = m2[1];
-      }
-
-      if (url) {
-        const openLine = `• Open PDF: [Open page](${url})\n  Raw: <${url}>`;
-        if (/Open PDF:[^\n]*/i.test(text)) {
-          text = text.replace(/Open PDF:[^\n]*/i, openLine);
-          text = text.replace(/Raw:\s*(https?:\/\/[^\s)]+)/i, `Raw: <${url}>`);
-        } else {
-          text = text.replace(/—— Verification ——/i, `—— Verification ——\n${openLine}`);
-        }
-      }
-
-      // Wrap any remaining Raw URLs so ReactMarkdown links them
-      text = text.replace(/Raw:\s*(https?:\/\/[^\s)]+)/g, (m, u) => `Raw: <${u}>`);
-
-      // Replace any '#page=<n>' placeholders with a real page if present elsewhere; else default to 1
-      if (text.includes("#page=<n>")) {
-        const m3 = text.match(/#page=(\d+)/);
-        text = text.replace(/#page=<n>/g, `#page=${m3 ? m3[1] : "1"}`);
-      }
-    })();
-
-    // 10) Return in your original shape
     return res.status(200).json({ result: text });
-
   } catch (err) {
     return res.status(500).json({ result: `Server error: ${String(err?.message || err)}` });
   }
 }
-
