@@ -1,6 +1,8 @@
+// pages/embed.js
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export default function EmbedChat() {
   const [messages, setMessages] = useState([]);
@@ -212,7 +214,17 @@ export default function EmbedChat() {
                   wordBreak: "break-word",
                 }}
               >
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  linkTarget="_blank"
+                  components={{
+                    a: ({ node, ...props }) => (
+                      <a {...props} target="_blank" rel="noopener noreferrer" />
+                    ),
+                  }}
+                >
+                  {msg.content}
+                </ReactMarkdown>
               </div>
             ))}
             {isTyping && (
