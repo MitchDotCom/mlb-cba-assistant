@@ -1,0 +1,46 @@
+name: Build CBA page index
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'public/mlb/MLB_CBA_2022.pdf'
+      - 'scripts/build_cba_pages.mjs'
+      - '.github/workflows/build-cba-pages.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Avoid infinite loops when this workflow's own commit pushes
+    if: ${{ !contains(github.event.head_commit.message, 'Auto-generate cba_pages.json') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pdfjs-dist (no save)
+        run: npm i pdfjs-dist@4.2.67 --no-save
+
+      - name: Build cba_pages.json
+        run: node scripts/build_cba_pages.mjs
+
+      - name: Commit result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- public/mlb/cba_pages.json; then
+            echo "No changes to cba_pages.json"
+          else
+            git add public/mlb/cba_pages.json
+            git commit -m "Auto-generate cba_pages.json"
+            git push
+          fi
