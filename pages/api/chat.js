@@ -1,55 +1,87 @@
 // pages/api/chat.js
-// Keeps your /embed contract: accepts { messages }, returns { result }.
-// Enforces your clean structure and builds correct PDF page links from page_map.json.
-// No "raw" URLs, no "collapsed", no parenthetical hints in output.
+// Keeps your frontend contract intact:
+//   - accepts { messages: [...] } from your /embed
+//   - returns { result: "<assistant text>" }
+//
+// What this does, deterministically:
+//   1) Sends your full conversation to your existing Assistant (ID below).
+//   2) Does NOT alter your base system instructions on the OpenAI platform.
+//   3) After the Assistant answers, it REMOVES any verification it printed.
+//   4) It parses the "Citation:" line for Article/Appendix codes.
+//   5) It looks up exact pages in public/mlb/page_map.json (authoritative).
+//   6) It rebuilds a minimal Verification block with:
+//        • One bullet per page: "Page <n> — Open page" (Markdown link)
+//        • The link uses “#page=<n>” and adds “&search=<first quote>” (best effort).
+//        • Confidence line preserved.
+//   7) No giant raw URLs. No "Sources (collapsed)". No parenthetical hints.
+//   8) Your ReactMarkdown should use linkTarget="_blank" so links open in new tabs.
 
-function extractCitationsBlock(text) {
-  // Grabs the "Citation:" line and returns it
+function stripExistingVerification(text) {
+  // Remove any existing 'Verification' block completely
+  const re = /(——\s*Verification\s*——)([\s\S]*?)(?=\n\S|\s*$)/i;
+  return text.replace(re, "").trim();
+}
+
+function getCitationLine(text) {
   const m = text.match(/(^|\n)Citation:\s*(.+)\n/i);
   return m ? m[2].trim() : "";
 }
 
-function parseCodesFromCitation(citationLine) {
-  // Tries to pull normalized codes like "XXIII.E.2" from a line such as:
-  // "CBA (2022–2026), Article XXIII(E)(2) and Appendix K."
-  // Returns an array of candidate codes: ["XXIII.E.2", "XXIII", ...]
+function getConfidence(text) {
+  const m = text.match(/Confidence:\s*(High|Medium|Low)/i);
+  return m ? m[1] : null;
+}
+
+function extractQuotes(text) {
+  // Pull quotes from the "CBA text:" section—prefers smart quotes, falls back to plain quotes
+  // 1) try smart quotes
+  const smart = Array.from(text.matchAll(/“([^”]{1,200})”/g)).map(m => m[1].trim()).filter(Boolean);
+  if (smart.length) return smart;
+  // 2) fallback ASCII quotes (keep short)
+  const ascii = Array.from(text.matchAll(/"([^"]{1,200})"/g)).map(m => m[1].trim()).filter(Boolean);
+  return ascii;
+}
+
+function encodeSearch(q) {
+  // Use up to ~6 words from the first quote for search param (best-effort highlight in viewers that support it)
+  if (!q) return "";
+  const words = q.replace(/\s+/g, " ").split(" ").slice(0, 6).join(" ");
+  return encodeURIComponent(words);
+}
+
+function normalizeCodesFromCitation(citationLine) {
+  // Parse things like "Article XIX(A)" -> "XIX.A"
+  // and "Article XXIII(E)(2)" -> "XXIII.E.2"
+  // Also collect top-level "XIX" and appendices like "Appendix K"
   const out = new Set();
 
-  // Article patterns like XXIII(E)(2)(b)...
-  const articleMatches = citationLine.match(/Article\s+([IVXLCDM]+)(\([^)]*\))*/gi) || [];
-  for (const a of articleMatches) {
-    // Pull roman
-    const art = (a.match(/Article\s+([IVXLCDM]+)/i) || [])[1];
-    if (!art) continue;
-    // Pull nested parens e.g. (E)(2)(b)
-    const nest = Array.from(a.matchAll(/\(([A-Za-z0-9]+)\)/g)).map(m => m[1]);
-    let code = art.toUpperCase();
-    for (const n of nest) {
-      // Normalize like E or 2 or b -> .E / .2 / .b (keep case)
-      code += "." + n;
+  const artRe = /Article\s+([IVXLCDM]+)((\([^)]*\))*)/gi;
+  let m;
+  while ((m = artRe.exec(citationLine)) !== null) {
+    const roman = m[1].toUpperCase(); // e.g., XXIII
+    const parens = m[2] || "";        // e.g., (E)(2)
+    const parts = Array.from(parens.matchAll(/\(([A-Za-z0-9]+)\)/g)).map(x => x[1]);
+    if (parts.length) {
+      out.add(roman + "." + parts.join("."));
     }
-    out.add(code);
-    // Also add plain Article as fallback
-    out.add(art.toUpperCase());
+    out.add(roman); // top-level fallback
   }
 
-  // Appendices like "Appendix K" or "Appendix B"
-  const appMatches = citationLine.match(/Appendix\s+([A-Z])/gi) || [];
-  for (const ap of appMatches) {
-    const letter = (ap.match(/Appendix\s+([A-Z])/i) || [])[1];
-    if (letter) out.add(`Appendix ${letter.toUpperCase()}`);
+  const appRe = /Appendix\s+([A-Z])/gi;
+  let n;
+  while ((n = appRe.exec(citationLine)) !== null) {
+    out.add(`Appendix ${n[1].toUpperCase()}`);
   }
 
   return Array.from(out);
 }
 
-function findPagesFromCodes(codes, pageMap) {
-  // pageMap keys look like "XXIII.E.2 (CBT — AAV)" or "Appendix B (CBT Tables)"
-  // We match by prefix before the space.
-  const pages = [];
+function mapCodesToPages(codes, pageMap) {
+  // pageMap keys like: "XXIII.E.2 (CBT — AAV)" or "XIX (Assignment ...)"
+  // Match by head token before first space
   const keys = Object.keys(pageMap || {});
+  const pages = [];
   for (const code of codes) {
-    // exact or prefix (before first space or paren)
     for (const k of keys) {
       const head = k.split(" ")[0]; // "XXIII.E.2"
       if (head.toLowerCase() === code.toLowerCase()) {
@@ -58,44 +90,23 @@ function findPagesFromCodes(codes, pageMap) {
       }
     }
   }
-  // Dedup by page
+  // Dedup on page
   const seen = new Set();
   return pages.filter(({ page }) => (seen.has(page) ? false : (seen.add(page), true)));
 }
 
-function rebuildVerification(text, pages, pdfUrl) {
-  // Always render a clean block with only bullets + confidence.
-  // If no pages are known, we keep whatever the model wrote (but we scrub "Raw").
-  const confMatch = text.match(/Confidence:\s*(High|Medium|Low)/i);
-  const confidence = confMatch ? confMatch[1] : null;
-
-  if (!pages.length && !confidence) {
-    // nothing we can deterministically improve
-    return text.replace(/Raw:\s*https?:\/\/\S+/gi, "").replace(/\n{3,}/g, "\n\n");
-  }
-
-  const bullets = pages
-    .map(({ page }) => `• Page ${page} — [Open page](${pdfUrl}#page=${page})`)
-    .join("\n");
+function buildVerificationBlock(pages, pdfUrl, confidence, firstQuote) {
+  // Build minimal, clean verification. One bullet per page.
+  // Always open in new tab on the client via ReactMarkdown linkTarget="_blank".
+  const search = encodeSearch(firstQuote);
+  const bullets = pages.map(({ page }) => {
+    const url = search ? `${pdfUrl}#page=${page}&search=${search}` : `${pdfUrl}#page=${page}`;
+    return `• Page ${page} — [Open page](${url})`;
+  }).join("\n");
 
   const confLine = confidence ? `\n• Confidence: ${confidence}` : "";
 
-  // Replace the entire Verification block if present, else append one.
-  const verRe = /(——\s*Verification\s*——)([\s\S]*?)(?=\n\S|\s*$)/i;
-  const cleanBlock = `—— Verification ——\n${bullets}${confLine}`;
-  if (verRe.test(text)) {
-    return text
-      .replace(verRe, cleanBlock)
-      .replace(/Raw:\s*https?:\/\/\S+/gi, "")
-      .replace(/\n{3,}/g, "\n\n");
-  } else {
-    return (
-      text
-        + `\n\n${cleanBlock}`
-    )
-      .replace(/Raw:\s*https?:\/\/\S+/gi, "")
-      .replace(/\n{3,}/g, "\n\n");
-  }
+  return `\n\n—— Verification ——\n${bullets}${confLine}`.trim() + "\n";
 }
 
 export default async function handler(req, res) {
@@ -109,8 +120,10 @@ export default async function handler(req, res) {
       return res.status(500).json({ result: "Missing OPENAI_API_KEY." });
     }
 
-    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // your existing Assistant
+    // === YOUR EXISTING ASSISTANT ID (do not change) ===
+    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
 
+    // Known-good asset domain you already deployed
     const DOMAIN = "https://mlb-cba-assistant-git-main-mitchdotcoms-projects.vercel.app";
     const PDF_URL = `${DOMAIN}/mlb/MLB_CBA_2022.pdf`;
     const PAGE_MAP_URL = `${DOMAIN}/mlb/page_map.json`;
@@ -120,10 +133,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ result: "No messages provided." });
     }
 
-    // Helper that throws on non-2xx
     async function ofetch(url, opts) {
       const r = await fetch(url, opts);
-      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(() => "")}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=> "")}`);
       return r.json();
     }
 
@@ -139,7 +151,7 @@ export default async function handler(req, res) {
     });
     const threadId = thread.id;
 
-    // Add full conversation (user + assistant)
+    // Add full conversation (user + assistant turns)
     for (const m of messages) {
       const role = (m?.role === "user" || m?.role === "assistant") ? m.role : "user";
       const content = typeof m?.content === "string" ? m.content : "";
@@ -162,37 +174,28 @@ export default async function handler(req, res) {
       if (pm.ok) pageMap = await pm.json();
     } catch {}
 
-    // Minimal, invisible run-time addendum:
-    // - keep YOUR system instructions exactly as set in the OpenAI Assistant
-    // - just force the simple output shape and ban meta directives from output
-    const RUNTIME_RULES = `
-OUTPUT SHAPE (exact headers, no meta commentary, no parenthetical hints):
+    // Tiny per-run addendum: DO NOT change your base instructions.
+    // This only requests the simple sections you already use.
+    const RUNTIME_NUDGE = `
+Output only these sections, in this order, with no meta text:
 Summary:
-<one sentence, plain-English>
+<one sentence>
 
-CBA text:
-“<short quote 1>”
-“<short quote 2>”
+How it works:
+• <bullets>
+
+Edge cases / exceptions:
+• <bullets> (if any)
 
 AI interpretation:
 AI interpretation: This reflects how clubs or players may respond to this rule in practice. It is not part of the CBA text.
-<one tight sentence on why it matters>
+<one tight sentence>
 
 Citation:
-CBA (2022–2026), <exact Article/Section and any Appendix>.
-
-—— Verification ——
-• Pages: <comma-separated page numbers from PAGE_MAP only; if unknown, leave empty>
-• Confidence: High | Medium | Low
-
-RULES:
-• Do NOT print instructions, token limits, or parenthetical guidance in the output.
-• Do NOT print "Sources (collapsed)". Omit that section entirely.
-• Use PAGE_MAP strictly for page numbers. Do not guess pages. If unmapped, leave Pages empty.
-• Quotes MUST come from the cited Article/Appendix text.
+CBA (2022–2026), <Article/Section and Appendix if used>.
 `.trim();
 
-    // Start run (appending only the runtime rules + page_map; your base instructions stay as-is in the Assistant)
+    // Start run
     const run = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
@@ -202,7 +205,7 @@ RULES:
       },
       body: JSON.stringify({
         assistant_id,
-        instructions: `PAGE_MAP: ${JSON.stringify(pageMap)}\n\n${RUNTIME_RULES}`
+        instructions: RUNTIME_NUDGE
       })
     });
 
@@ -210,7 +213,7 @@ RULES:
     let status = run.status;
     let tries = 0;
     while ((status === "queued" || status === "in_progress") && tries < 40) {
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 1400));
       const s = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`, {
         headers: {
           "Authorization": `Bearer ${OPENAI_API_KEY}`,
@@ -234,16 +237,29 @@ RULES:
     const assistantMsg = Array.isArray(msgs?.data) ? msgs.data.find(m => m.role === "assistant") : null;
     let text = assistantMsg?.content?.[0]?.text?.value?.trim() || "No response.";
 
-    // Build links from PAGE_MAP using the Citation line
-    const citationLine = extractCitationsBlock(text);
-    const codes = parseCodesFromCitation(citationLine);
-    const pageItems = findPagesFromCodes(codes, pageMap);
+    // Strip any verification the model printed
+    text = stripExistingVerification(text);
 
-    // Rewrite verification block cleanly with real links from map (no Raw, no fluff)
-    text = rebuildVerification(text, pageItems, PDF_URL);
+    // Parse citation + quotes + confidence
+    const citationLine = getCitationLine(text);
+    const confidence = getConfidence(assistantMsg?.content?.[0]?.text?.value || "");
+    const quotes = extractQuotes(text);
+    const firstQuote = quotes[0] || "";
 
+    // Map to pages using your page_map.json
+    const codes = normalizeCodesFromCitation(citationLine);
+    const pageItems = mapCodesToPages(codes, pageMap);
+
+    // Rebuild a clean Verification block with correct links
+    if (pageItems.length || confidence) {
+      text += buildVerificationBlock(pageItems, PDF_URL, confidence, firstQuote);
+    }
+
+    // Return to your frontend
     return res.status(200).json({ result: text });
+
   } catch (err) {
     return res.status(500).json({ result: `Server error: ${String(err?.message || err)}` });
   }
 }
+
