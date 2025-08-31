@@ -12,20 +12,20 @@ export default async function handler(req, res) {
       return res.status(200).json({ result: "Missing OPENAI_API_KEY on the server." });
     }
 
-    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // keep your Assistant
+    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
     if (!messages.length) return res.status(200).json({ result: "No question provided." });
 
     const lastUser = [...messages].reverse().find(m => m?.role === "user")?.content || "";
 
-    // Small helper
+    // helper
     async function ofetch(url, opts) {
       const r = await fetch(url, opts);
       if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=> "")}`);
       return r.json();
     }
 
-    // 1) Thread
+    // 1) thread
     const thread = await ofetch("https://api.openai.com/v1/threads", {
       method: "POST",
       headers: {
@@ -37,7 +37,7 @@ export default async function handler(req, res) {
     });
     const threadId = thread.id;
 
-    // 2) Post convo
+    // 2) post convo
     for (const m of messages) {
       const role = (m?.role === "assistant") ? "assistant" : "user";
       const content = (m?.content || "").toString().trim();
@@ -53,13 +53,12 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3) Force brief verbatim fragments (generic; no topic hints)
+    // 3) run with minimal override: force short verbatim fragments (no hints)
     const override =
       "After your standard output (Summary, How it works, Edge cases / exceptions, AI interpretation, Citation), " +
-      "append 1–2 short, distinctive fragments (≤ 35 words) copied verbatim from the MLB CBA that support your answer. " +
+      "append 1–4 short, distinctive fragments (≤ 35 words) copied verbatim from the MLB CBA that support your answer. " +
       "Do NOT add page numbers or links. Do NOT paraphrase. Use straight quotes only.";
 
-    // 4) Run
     const run = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
@@ -70,10 +69,10 @@ export default async function handler(req, res) {
       body: JSON.stringify({ assistant_id, instructions: override })
     });
 
-    // 5) Poll
+    // 4) poll
     let status = run.status, tries = 0;
     while ((status === "queued" || status === "in_progress") && tries < 40) {
-      await new Promise(r => setTimeout(r, 1200));
+      await new Promise(r => setTimeout(r, 1100));
       const s = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`, {
         headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "assistants=v2" }
       });
@@ -83,19 +82,19 @@ export default async function handler(req, res) {
       return res.status(200).json({ result: "Assistant error: timed out preparing the reply." });
     }
 
-    // 6) Read
+    // 5) read assistant message
     const msgs = await ofetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
       headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "assistants=v2" }
     });
     const assistantMsg = Array.isArray(msgs?.data) ? msgs.data.find(m => m.role === "assistant") : null;
     const raw = assistantMsg?.content?.[0]?.text?.value?.trim() || "The assistant returned an empty response.";
 
-    // 7) Origin for HTTP fallback
+    // 6) origin for HTTP fallback
     const host = req.headers["x-forwarded-host"] || req.headers.host || "mlb.mitchleblanc.xyz";
     const proto = req.headers["x-forwarded-proto"] || "https";
     const origin = `${proto}://${host}`;
 
-    // 8) Inject canonical Citation + Source text (question is required here)
+    // 7) inject page-linked citations + multi-bullets
     let finalText = raw;
     try {
       const { text } = await attachVerification(raw, lastUser, "/mlb/MLB_CBA_2022.pdf", origin);
