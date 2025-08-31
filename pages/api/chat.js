@@ -1,5 +1,5 @@
-// pages/api/chat.js
-import { linkifyCitations } from "@/lib/linkifyCitations";
+// /pages/api/chat.js
+import { linkifyCitations } from "../../lib/linkifyCitations"; // <-- RELATIVE import (no @ alias)
 
 export default async function handler(req, res) {
   try {
@@ -12,20 +12,22 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Missing OPENAI_API_KEY on the server." });
     }
 
+    // ✅ Your Assistant ID from the OpenAI platform
     const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
+
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
     if (!messages.length) {
       return res.status(400).json({ error: "No question provided." });
     }
 
-    // Simple fetch helper
+    // helper to call OpenAI REST endpoints
     async function j(url, opts) {
       const r = await fetch(url, opts);
-      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=> "")}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=>"")}`);
       return r.json();
     }
 
-    // Create a thread
+    // 1) Create a thread
     const thread = await j("https://api.openai.com/v1/threads", {
       method: "POST",
       headers: {
@@ -37,11 +39,12 @@ export default async function handler(req, res) {
     });
     const threadId = thread.id;
 
-    // Seed messages (user + any prior assistant content if you keep history)
+    // 2) Add user messages
     for (const m of messages) {
       const role = (m?.role === "assistant") ? "assistant" : "user";
       const content = (m?.content || "").toString().trim();
       if (!content) continue;
+
       await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
         method: "POST",
         headers: {
@@ -53,7 +56,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Run the assistant with NO extra overrides (trust your system prompt in the platform)
+    // 3) Run the Assistant (trust the platform system prompt)
     const run = await j(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
@@ -64,7 +67,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({ assistant_id })
     });
 
-    // Wait until completion
+    // 4) Poll until completed
     async function wait(runId) {
       let tries = 0;
       while (tries < 60) {
@@ -83,10 +86,9 @@ export default async function handler(req, res) {
       }
       throw new Error("Run timed out");
     }
-
     await wait(run.id);
 
-    // Collect the latest assistant message text (flatten text parts if needed)
+    // 5) Get the latest assistant message text
     const msgs = await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
       headers: {
         "Authorization": `Bearer ${OPENAI_API_KEY}`,
@@ -98,7 +100,6 @@ export default async function handler(req, res) {
     let raw = "";
 
     if (assistantMsg?.content?.length) {
-      // Concatenate all text segments (ignore images/attachments)
       raw = assistantMsg.content
         .filter(part => part.type === "text" && part.text?.value)
         .map(part => part.text.value)
@@ -108,7 +109,7 @@ export default async function handler(req, res) {
 
     if (!raw) raw = "The assistant returned an empty response.";
 
-    // DO NOT rewrite. Only linkify “Page N — Open page”.
+    // 6) DO NOT rewrite. Only linkify “Page N — Open page”.
     const result = linkifyCitations(raw);
 
     return res.status(200).json({ result });
