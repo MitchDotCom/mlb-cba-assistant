@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export default function EmbedChat() {
   const [messages, setMessages] = useState([]);
@@ -24,7 +25,6 @@ export default function EmbedChat() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // send full convo (keeps your existing behavior)
         body: JSON.stringify({ messages: [...messages, userMessage] }),
       });
 
@@ -71,24 +71,15 @@ export default function EmbedChat() {
         />
         <style>{`
           html, body, #__next { height: 100%; margin: 0; padding: 0; }
-          /* prefer dynamic viewport height to kill iOS bars gap */
           .vh { height: 100vh; }
-          @supports (height: 100dvh) {
-            .vh { height: 100dvh; }
-          }
+          @supports (height: 100dvh) { .vh { height: 100dvh; } }
           @media (max-width: 640px) {
-            .card {
-              max-width: 100vw !important;
-              border-left: none !important;
-              border-right: none !important;
-              box-shadow: none !important;
-            }
+            .card { max-width: 100vw !important; border-left: none !important; border-right: none !important; box-shadow: none !important; }
           }
           a { color: #2563eb; }
         `}</style>
       </Head>
 
-      {/* FULL-BLEED BACKGROUND */}
       <div
         className="vh"
         style={{
@@ -100,7 +91,6 @@ export default function EmbedChat() {
           justifyContent: "center",
         }}
       >
-        {/* CARD */}
         <div
           className="card vh"
           style={{
@@ -108,7 +98,7 @@ export default function EmbedChat() {
             width: "100vw",
             maxWidth: 520,
             margin: "0 auto",
-            borderRadius: 0,                 // no curves -> no white gaps
+            borderRadius: 0,
             boxShadow: "0 2px 24px rgba(0,0,0,0.10)",
             display: "flex",
             flexDirection: "column",
@@ -116,7 +106,6 @@ export default function EmbedChat() {
             boxSizing: "border-box",
           }}
         >
-          {/* HEADER (no rounded corners) */}
           <div
             style={{
               background: "#222",
@@ -143,7 +132,6 @@ export default function EmbedChat() {
             </div>
           </div>
 
-          {/* NOTICE + BACK */}
           <div
             style={{
               background: "#fff8dc",
@@ -181,7 +169,6 @@ export default function EmbedChat() {
             </div>
           </div>
 
-          {/* CHAT WINDOW */}
           <div
             role="log"
             aria-live="polite"
@@ -205,14 +192,20 @@ export default function EmbedChat() {
                   background: msg.role === "user" ? "#2563eb" : "#e5e7eb",
                   color: msg.role === "user" ? "white" : "#111827",
                   padding: "12px 14px",
-                  borderRadius: 12, // tighter radius to avoid “pill” gaps
+                  borderRadius: 12,
                   maxWidth: "90vw",
                   fontSize: 14,
                   lineHeight: 1.4,
                   wordBreak: "break-word",
                 }}
               >
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                {msg.role === "assistant" ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} linkTarget="_blank">
+                    {msg.content}
+                  </ReactMarkdown>
+                ) : (
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                )}
               </div>
             ))}
             {isTyping && (
@@ -226,7 +219,6 @@ export default function EmbedChat() {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* INPUT */}
           <form
             onSubmit={handleSubmit}
             style={{
@@ -274,7 +266,6 @@ export default function EmbedChat() {
             </button>
           </form>
 
-          {/* FOOTER (no rounded corners) */}
           <div
             style={{
               background: "#fff",
