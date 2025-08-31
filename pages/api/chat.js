@@ -12,14 +12,21 @@ export default async function handler(req, res) {
       return res.status(200).json({ result: "Missing OPENAI_API_KEY on the server." });
     }
 
-    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // your Assistant
-    const msgs = Array.isArray(req.body?.messages) ? req.body.messages : [];
-    if (!msgs.length) return res.status(200).json({ result: "No question provided." });
+    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2"; // keep your Assistant
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    if (!messages.length) return res.status(200).json({ result: "No question provided." });
 
-    const lastUser = [...msgs].reverse().find(m => m?.role === "user")?.content || "";
+    const lastUser = [...messages].reverse().find(m => m?.role === "user")?.content || "";
 
-    // 1) Create thread
-    const tRes = await fetch("https://api.openai.com/v1/threads", {
+    // Small helper
+    async function ofetch(url, opts) {
+      const r = await fetch(url, opts);
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=> "")}`);
+      return r.json();
+    }
+
+    // 1) Thread
+    const thread = await ofetch("https://api.openai.com/v1/threads", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -28,14 +35,14 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({})
     });
-    const thread = await tRes.json();
+    const threadId = thread.id;
 
-    // 2) Post convo (user + assistant turns, if any)
-    for (const m of msgs) {
-      const role = m?.role === "assistant" ? "assistant" : "user";
+    // 2) Post convo
+    for (const m of messages) {
+      const role = (m?.role === "assistant") ? "assistant" : "user";
       const content = (m?.content || "").toString().trim();
       if (!content) continue;
-      await fetch(`https://api.openai.com/v1/threads/${thread.id}/messages`, {
+      await ofetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -53,7 +60,7 @@ export default async function handler(req, res) {
       "Do NOT add page numbers or links. Do NOT paraphrase. Use straight quotes only.";
 
     // 4) Run
-    const rRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/runs`, {
+    const run = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -62,42 +69,39 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({ assistant_id, instructions: override })
     });
-    const run = await rRes.json();
 
     // 5) Poll
-    let status = run?.status, tries = 0;
+    let status = run.status, tries = 0;
     while ((status === "queued" || status === "in_progress") && tries < 40) {
       await new Promise(r => setTimeout(r, 1200));
-      const sRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/runs/${run.id}`, {
+      const s = await ofetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`, {
         headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "assistants=v2" }
       });
-      const s = await sRes.json();
-      status = s?.status; tries++;
+      status = s.status; tries++;
     }
     if (status !== "completed") {
       return res.status(200).json({ result: "Assistant error: timed out preparing the reply." });
     }
 
-    // 6) Read assistant message
-    const mRes = await fetch(`https://api.openai.com/v1/threads/${thread.id}/messages`, {
+    // 6) Read
+    const msgs = await ofetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
       headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "assistants=v2" }
     });
-    const mJson = await mRes.json();
-    const assistantMsg = Array.isArray(mJson?.data) ? mJson.data.find(m => m.role === "assistant") : null;
+    const assistantMsg = Array.isArray(msgs?.data) ? msgs.data.find(m => m.role === "assistant") : null;
     const raw = assistantMsg?.content?.[0]?.text?.value?.trim() || "The assistant returned an empty response.";
 
-    // 7) Build origin (for HTTP asset fallback)
+    // 7) Origin for HTTP fallback
     const host = req.headers["x-forwarded-host"] || req.headers.host || "mlb.mitchleblanc.xyz";
     const proto = req.headers["x-forwarded-proto"] || "https";
     const origin = `${proto}://${host}`;
 
-    // 8) Inject canonical Citation + Source text using official PDF (or cba_pages.json)
+    // 8) Inject canonical Citation + Source text (question is required here)
     let finalText = raw;
     try {
       const { text } = await attachVerification(raw, lastUser, "/mlb/MLB_CBA_2022.pdf", origin);
       finalText = text;
     } catch (e) {
-      console.error("[attachVerification] ERROR:", e?.message || e);
+      console.error("[chat attachVerification] ERROR:", e?.message || e);
     }
 
     return res.status(200).json({ result: finalText });
