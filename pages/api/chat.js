@@ -1,53 +1,43 @@
-import { Configuration, OpenAIApi } from "openai";
-import { resolvePageNumber } from "../../lib/resolvePageNumber.js";
+import { streamText } from "ai";
+import OpenAI from "openai";
+import pageMap from "./page_map.json";
 
-// Ensure API key is set
-const configuration = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-const openai = new OpenAIApi(configuration);
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Main API handler
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
+export async function POST(req) {
   try {
-    const { messages } = req.body;
+    const { messages } = await req.json();
 
-    // Call OpenAI
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
-      temperature: 0,
+    // user’s latest query
+    const userMessage = messages[messages.length - 1].content;
+
+    // --- EXACT MATCH LOGIC ---
+    let matchedSection = null;
+
+    for (const [key, value] of Object.entries(pageMap)) {
+      if (userMessage.toLowerCase().includes(key.toLowerCase())) {
+        matchedSection = value;
+        break; // stop at first exact match
+      }
+    }
+
+    // If no exact match, send null context
+    const context = matchedSection
+      ? `Matched CBA Section:\n${matchedSection.title}\nPages ${matchedSection.start}-${matchedSection.end}`
+      : "No exact match found in page_map.json";
+
+    // Call OpenAI Assistant with context
+    const result = await streamText({
+      model: "gpt-4.1", // or the assistant API if you wired it
+      messages: [
+        ...messages,
+        { role: "system", content: `Context from CBA:\n${context}` },
+      ],
     });
 
-    let output = completion.choices[0].message.content;
-
-    // Post-process citations to swap in correct page numbers
-    output = linkifyCitations(output);
-
-    return res.status(200).json({ result: output });
+    return result.toAIStreamResponse();
   } catch (err) {
-    console.error("Error in chat handler:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error("Chat route error:", err);
+    return new Response("Something went wrong in chat.js", { status: 500 });
   }
-}
-
-/**
- * Replace Assistant-supplied citations with trusted PDF links
- */
-function linkifyCitations(text) {
-  const citationRegex =
-    /CBA \(2022–2026\), Article ([A-Za-z0-9().–]+)(?:; Page \d+)?/g;
-
-  return text.replace(citationRegex, (match, articleKey) => {
-    const page = resolvePageNumber(`Article ${articleKey}`);
-    if (page) {
-      return `CBA (2022–2026), Article ${articleKey}; Page ${page} — <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Open page</a>`;
-    }
-    // fallback: keep the original if no mapping
-    return match;
-  });
 }
