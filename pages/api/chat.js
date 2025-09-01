@@ -1,71 +1,120 @@
-// pages/api/chat.js
-import OpenAI from "openai";
-import pageMap from "../../lib/page_map.json";
-
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-function resolvePageNumber(quote) {
-  if (!quote) return null;
-  for (const [section, page] of Object.entries(pageMap)) {
-    if (quote.includes(section)) {
-      return page;
-    }
-  }
-  return null;
-}
+// /pages/api/chat.js
+import { linkifyCitations } from "../../lib/linkifyCitations"; // <-- RELATIVE import (no @ alias)
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
   try {
-    const { prompt } = req.body;
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
 
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are the MLB CBA Assistant. Always provide structured answers with Summary, How it works, Edge cases, Disclaimer, Citation, and LEGAL_EXCERPTS.",
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY on the server." });
+    }
+
+    // ✅ Your Assistant ID from the OpenAI platform
+    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
+
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    if (!messages.length) {
+      return res.status(400).json({ error: "No question provided." });
+    }
+
+    // helper to call OpenAI REST endpoints
+    async function j(url, opts) {
+      const r = await fetch(url, opts);
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=>"")}`);
+      return r.json();
+    }
+
+    // 1) Create a thread
+    const thread = await j("https://api.openai.com/v1/threads", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2",
+      },
+      body: JSON.stringify({})
+    });
+    const threadId = thread.id;
+
+    // 2) Add user messages
+    for (const m of messages) {
+      const role = (m?.role === "assistant") ? "assistant" : "user";
+      const content = (m?.content || "").toString().trim();
+      if (!content) continue;
+
+      await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
         },
-        { role: "user", content: prompt },
-      ],
+        body: JSON.stringify({ role, content })
+      });
+    }
+
+    // 3) Run the Assistant (trust the platform system prompt)
+    const run = await j(`https://api.openai.com/v1/threads/${threadId}/runs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2",
+      },
+      body: JSON.stringify({ assistant_id })
     });
 
-    // Robustly extract assistant reply
-    let text =
-      completion.choices?.[0]?.message?.content ||
-      completion.choices?.[0]?.text ||
-      "No response from model.";
-
-    // Add PDF links to "Page X" mentions
-    text = text.replace(/Page (\d+)/g, (match, p1) => {
-      const page = parseInt(p1, 10);
-      if (!isNaN(page)) {
-        return `Page ${page} — <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Open page</a>`;
+    // 4) Poll until completed
+    async function wait(runId) {
+      let tries = 0;
+      while (tries < 60) {
+        await new Promise(r => setTimeout(r, 1000));
+        const s = await j(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
+          headers: {
+            "Authorization": `Bearer ${OPENAI_API_KEY}`,
+            "OpenAI-Beta": "assistants=v2"
+          }
+        });
+        if (s.status === "completed") return;
+        if (["failed", "cancelled", "expired"].includes(s.status)) {
+          throw new Error(`Run ${s.status}`);
+        }
+        tries++;
       }
-      return match;
-    });
+      throw new Error("Run timed out");
+    }
+    await wait(run.id);
 
-    // Add PDF links to legal quotes
-    text = text.replace(/QUOTE: "(.*?)"/g, (match, quote) => {
-      const page = resolvePageNumber(quote);
-      if (page) {
-        return `QUOTE: "${quote}" (See <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Page ${page}</a>)`;
+    // 5) Get the latest assistant message text
+    const msgs = await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
       }
-      return match;
     });
 
-    return res.status(200).json({ output: text });
-  } catch (err) {
-    console.error("Chat API error:", err);
-    return res.status(200).json({
-      output:
-        "Sorry—something went wrong with the assistant. Please try again.",
-    });
+    const assistantMsg = msgs?.data?.find(m => m.role === "assistant");
+    let raw = "";
+
+    if (assistantMsg?.content?.length) {
+      raw = assistantMsg.content
+        .filter(part => part.type === "text" && part.text?.value)
+        .map(part => part.text.value)
+        .join("\n\n")
+        .trim();
+    }
+
+    if (!raw) raw = "The assistant returned an empty response.";
+
+    // 6) DO NOT rewrite. Only linkify “Page N — Open page”.
+    const result = linkifyCitations(raw);
+
+    return res.status(200).json({ result });
+  } catch (e) {
+    console.error("[/api/chat] ERROR:", e?.message || e);
+    return res.status(500).json({ error: "Internal error" });
   }
 }
