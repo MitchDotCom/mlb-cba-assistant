@@ -1,8 +1,9 @@
 // /pages/api/chat.js
-// Minimal, robust Assistants v2 call -> returns { result }.
-// We DO NOT trust page numbers from OpenAI. We post-process with linkifyCitations().
+// Assistants v2 -> get reply -> rewrite ONLY Citation lines using page_map.json -> return { result }
 
-import { linkifyCitations } from "../../lib/linkifyCitations";
+import fs from "fs";
+import path from "path";
+import { linkifyCitationsWithMap } from "../../lib/linkifyCitations";
 
 export default async function handler(req, res) {
   try {
@@ -11,103 +12,118 @@ export default async function handler(req, res) {
     }
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    const assistant_id = process.env.OPENAI_ASSISTANT_ID || "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
     if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY on the server." });
     }
 
-    // Safe body parse
-    let body = req.body;
-    if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch { body = {}; }
+    const assistant_id = process.env.OPENAI_ASSISTANT_ID || "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    if (!messages.length) {
+      return res.status(400).json({ error: "No question provided." });
     }
-    const { messages = [] } = body || {};
-    const safeMessages = Array.isArray(messages) && messages.length
-      ? messages
-      : [{ role: "user", content: "Help me understand a rule in the MLB CBA." }];
 
-    // Helper for OpenAI fetch
-    const callOpenAI = async (url, init) => {
-      const r = await fetch(url, {
-        ...init,
-        headers: {
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-          "OpenAI-Beta": "assistants=v2",
-          ...(init && init.headers),
-        },
-      });
+    // --- Load page_map.json from the repo (DON'T import from /public; read the file) ---
+    let pageMap = {};
+    try {
+      const pageMapPath = path.join(process.cwd(), "public", "mlb", "page_map.json");
+      pageMap = JSON.parse(fs.readFileSync(pageMapPath, "utf8"));
+    } catch (e) {
+      console.warn("[chat] Could not read public/mlb/page_map.json:", e.message);
+      pageMap = {};
+    }
+
+    const j = async (url, opts) => {
+      const r = await fetch(url, opts);
       if (!r.ok) {
         const t = await r.text().catch(() => "");
-        throw new Error(`OpenAI ${r.status} ${r.statusText} — ${t.slice(0, 1000)}`);
+        throw new Error(`HTTP ${r.status} ${r.statusText} — ${t.slice(0, 600)}`);
       }
       return r.json();
     };
 
-    // 1) Thread
-    const thread = await callOpenAI("https://api.openai.com/v1/threads", { method: "POST", body: JSON.stringify({}) });
+    // 1) Create thread
+    const thread = await j("https://api.openai.com/v1/threads", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
+      },
+      body: JSON.stringify({})
+    });
     const threadId = thread.id;
 
-    // 2) Add user messages
-    for (const m of safeMessages) {
-      const role = m.role === "assistant" ? "assistant" : "user";
-      const content = typeof m.content === "string" ? m.content : "";
+    // 2) Seed messages (preserve prior convo)
+    for (const m of messages) {
+      const role = m?.role === "assistant" ? "assistant" : "user";
+      const content = String(m?.content || "").trim();
       if (!content) continue;
-      await callOpenAI(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+
+      await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ role, content }),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2"
+        },
+        body: JSON.stringify({ role, content })
       });
     }
 
-    // 3) Run assistant
-    const run = await callOpenAI(`https://api.openai.com/v1/threads/${threadId}/runs`, {
+    // 3) Run the assistant (trust your Platform system prompt)
+    const run = await j(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
-      body: JSON.stringify({ assistant_id }),
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
+      },
+      body: JSON.stringify({ assistant_id })
     });
 
-    // 4) Poll
-    async function waitForRun(runId) {
-      for (let i = 0; i < 90; i++) {
+    // 4) Poll until completed (up to 60s)
+    async function wait(runId) {
+      for (let tries = 0; tries < 60; tries++) {
         await new Promise(r => setTimeout(r, 1000));
-        const st = await callOpenAI(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, { method: "GET" });
-        if (st.status === "completed") return;
-        if (["failed", "cancelled", "expired"].includes(st.status)) {
-          throw new Error(`Run ${st.status}: ${st.last_error?.message || "no details"}`);
+        const s = await j(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
+          headers: {
+            "Authorization": `Bearer ${OPENAI_API_KEY}`,
+            "OpenAI-Beta": "assistants=v2"
+          }
+        });
+        if (s.status === "completed") return;
+        if (["failed", "cancelled", "expired"].includes(s.status)) {
+          throw new Error(`Run ${s.status}`);
         }
       }
-      throw new Error("Run timed out.");
+      throw new Error("Run timed out");
     }
-    await waitForRun(run.id);
+    await wait(run.id);
 
-    // 5) Read newest assistant message
-    const list = await callOpenAI(`https://api.openai.com/v1/threads/${threadId}/messages?order=desc&limit=30`, {
-      method: "GET",
-    });
-
-    let raw = "";
-    for (const msg of list.data || []) {
-      if (msg.role !== "assistant") continue;
-      if (!Array.isArray(msg.content)) continue;
-      const parts = [];
-      for (const c of msg.content) {
-        if (c.type === "text" && c.text?.value) parts.push(c.text.value);
-        if (c.type === "output_text" && c.output_text?.value) parts.push(c.output_text.value);
+    // 5) Read the latest assistant message
+    const msgList = await j(`https://api.openai.com/v1/threads/${threadId}/messages?limit=50&order=desc`, {
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2"
       }
-      const joined = parts.join("\n").trim();
-      if (joined) { raw = joined; break; }
-    }
-    if (!raw) raw = "No response from assistant.";
-
-    // 6) Re-wire Citation lines to your real PDF pages using page_map.json
-    const result = await linkifyCitations(raw);
-
-    return res.status(200).json({ result });
-  } catch (err) {
-    console.error("[/api/chat] ERROR:", err?.message || err);
-    return res.status(200).json({
-      result:
-        "Sorry—something went wrong. Please try again.\n\n" +
-        "If this keeps happening, verify OPENAI_API_KEY/OPENAI_ASSISTANT_ID and that /public/mlb/page_map.json exists.",
     });
+
+    const firstAssistant = (msgList?.data || []).find(m => m.role === "assistant");
+    const raw = (firstAssistant?.content || [])
+      .map(c => (typeof c?.text?.value === "string" ? c.text.value : ""))
+      .join("\n")
+      .trim();
+
+    if (!raw) {
+      return res.status(200).json({ result: "No response from assistant." });
+    }
+
+    // 6) Rewrite only Citation lines with the correct PDF pages + markdown links
+    const fixed = linkifyCitationsWithMap(raw, pageMap, "/mlb/MLB_CBA_2022.pdf");
+
+    return res.status(200).json({ result: fixed });
+  } catch (err) {
+    console.error("[chat] error:", err);
+    return res.status(200).json({ result: "Sorry—something went wrong. Please try again." });
   }
 }
