@@ -1,43 +1,71 @@
-import { streamText } from "ai";
+// pages/api/chat.js
 import OpenAI from "openai";
-import pageMap from "./page_map.json";
+import pageMap from "../../lib/page_map.json";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-export async function POST(req) {
-  try {
-    const { messages } = await req.json();
+// Helper: try to resolve page number for a quoted excerpt
+function resolvePageNumber(quote) {
+  if (!quote) return null;
 
-    // user’s latest query
-    const userMessage = messages[messages.length - 1].content;
-
-    // --- EXACT MATCH LOGIC ---
-    let matchedSection = null;
-
-    for (const [key, value] of Object.entries(pageMap)) {
-      if (userMessage.toLowerCase().includes(key.toLowerCase())) {
-        matchedSection = value;
-        break; // stop at first exact match
-      }
+  // search values of pageMap for exact substring match
+  for (const [section, page] of Object.entries(pageMap)) {
+    if (quote.includes(section)) {
+      return page;
     }
+  }
+  return null;
+}
 
-    // If no exact match, send null context
-    const context = matchedSection
-      ? `Matched CBA Section:\n${matchedSection.title}\nPages ${matchedSection.start}-${matchedSection.end}`
-      : "No exact match found in page_map.json";
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
 
-    // Call OpenAI Assistant with context
-    const result = await streamText({
-      model: "gpt-4.1", // or the assistant API if you wired it
+  try {
+    const { prompt } = req.body;
+
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
       messages: [
-        ...messages,
-        { role: "system", content: `Context from CBA:\n${context}` },
+        {
+          role: "system",
+          content:
+            "You are the MLB CBA Assistant. Always provide structured answers with Summary, How it works, Edge cases, Disclaimer, Citation, and LEGAL_EXCERPTS.",
+        },
+        { role: "user", content: prompt },
       ],
     });
 
-    return result.toAIStreamResponse();
+    let text = completion.choices[0].message.content;
+
+    // Try to inject PDF links based on page_map.json
+    text = text.replace(/Page (\d+)/g, (match, p1) => {
+      const page = parseInt(p1, 10);
+      if (!isNaN(page)) {
+        return `Page ${page} — <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Open page</a>`;
+      }
+      return match;
+    });
+
+    // Additionally check LEGAL_EXCERPTS quotes for mapping
+    text = text.replace(
+      /QUOTE: "(.*?)"/g,
+      (match, quote) => {
+        const page = resolvePageNumber(quote);
+        if (page) {
+          return `QUOTE: "${quote}" (See <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Page ${page}</a>)`;
+        }
+        return match;
+      }
+    );
+
+    res.status(200).json({ output: text });
   } catch (err) {
-    console.error("Chat route error:", err);
-    return new Response("Something went wrong in chat.js", { status: 500 });
+    console.error("Chat API error:", err);
+    res.status(500).json({ error: "Something went wrong." });
   }
 }
