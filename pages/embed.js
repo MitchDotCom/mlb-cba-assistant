@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 
 export default function EmbedChat() {
   const [messages, setMessages] = useState([]);
+  const [threadId, setThreadId] = useState(null);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState("");
@@ -25,7 +26,7 @@ export default function EmbedChat() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: [...messages, userMessage] }),
+        body: JSON.stringify({ message: text, threadId }),
       });
 
       if (!res.ok) {
@@ -34,12 +35,15 @@ export default function EmbedChat() {
       }
 
       const data = await res.json();
+      if (data?.threadId && !threadId) setThreadId(data.threadId);
+
       const assistantMessage = {
         role: "assistant",
         content: data.result || "No response from assistant.",
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (e) {
+      console.error(e);
       setError("Sorry—something went wrong. Please try again.");
     } finally {
       setIsTyping(false);
