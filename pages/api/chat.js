@@ -1,27 +1,19 @@
 // pages/api/chat.js
-// Calls Assistants v2, grabs the text, runs linkifyCitations() to inject correct
-// start pages + <a> links from public/mlb/page_map.json, then returns the result.
-
-import { linkifyCitations } from "../../lib/linkifyCitations";
+// Minimal Assistants v2 passthrough — no linkify, reuses thread, tighter polling.
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ result: "Method not allowed" });
-    }
+    if (req.method !== "POST") return res.status(405).json({ result: "Method not allowed" });
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     const assistant_id = process.env.OPENAI_ASSISTANT_ID;
     if (!OPENAI_API_KEY || !assistant_id) {
-      return res
-        .status(500)
-        .json({ result: "Server misconfigured: missing OPENAI_API_KEY or OPENAI_ASSISTANT_ID." });
+      return res.status(500).json({ result: "Missing OPENAI_API_KEY or OPENAI_ASSISTANT_ID." });
     }
 
-    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
-    if (!messages.length) {
-      return res.status(200).json({ result: "No question provided." });
-    }
+    const { message, threadId: existingThreadId } = req.body ?? {};
+    const text = (message ?? "").toString().trim();
+    if (!text) return res.status(200).json({ result: "No question provided." });
 
     const j = async (url, opts) => {
       const r = await fetch(url, {
@@ -40,64 +32,55 @@ export default async function handler(req, res) {
       return r.json();
     };
 
-    // create thread
-    const thread = await j("https://api.openai.com/v1/threads", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    const threadId = thread.id;
-
-    // add messages
-    for (const m of messages) {
-      const role = m?.role === "assistant" ? "assistant" : "user";
-      const content = String(m?.content || "").trim();
-      if (!content) continue;
-      await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ role, content }),
-      });
+    // Reuse thread if provided; otherwise create once.
+    let threadId = existingThreadId;
+    if (!threadId) {
+      const thread = await j("https://api.openai.com/v1/threads", { method: "POST", body: "{}" });
+      threadId = thread.id;
     }
 
-    // run assistant
+    // Add only the new user message (no re-sending the entire history).
+    await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ role: "user", content: text }),
+    });
+
+    // Run the assistant.
     const run = await j(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       body: JSON.stringify({ assistant_id }),
     });
 
-    // poll up to ~30s
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
+    // Poll faster (every 250ms, up to ~30s).
+    let status = null;
+    for (let i = 0; i < 120; i++) {
+      await new Promise((r) => setTimeout(r, 250));
       const s = await j(
         `https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`,
         { method: "GET" }
       );
-      if (s.status === "completed") break;
-      if (["failed", "cancelled", "expired"].includes(s.status)) {
-        throw new Error(`Run ${s.status}`);
+      status = s.status;
+      if (status === "completed") break;
+      if (["failed", "cancelled", "expired"].includes(status)) {
+        throw new Error(`Run ${status}`);
       }
-      if (i === 29) throw new Error("Run timed out");
     }
+    if (status !== "completed") throw new Error("Run timed out");
 
-    // read last assistant message
+    // Read the latest assistant message.
     const msgs = await j(
-      `https://api.openai.com/v1/threads/${threadId}/messages?order=desc&limit=20`,
+      `https://api.openai.com/v1/threads/${threadId}/messages?order=desc&limit=10`,
       { method: "GET" }
     );
     const firstAssistant = (msgs?.data || []).find((m) => m.role === "assistant");
-    const raw =
+    const textOut =
       (firstAssistant?.content || [])
         .map((c) => (typeof c?.text?.value === "string" ? c.text.value : ""))
         .join("\n")
-        .trim() || "";
+        .trim() || "No response from assistant.";
 
-    if (!raw) {
-      return res.status(200).json({ result: "No response from assistant." });
-    }
-
-    // IMPORTANT: rewrite PAGE fields using ONLY your map (article start) + add <a> links
-    const fixed = linkifyCitations(raw, "/mlb/MLB_CBA_2022.pdf");
-
-    return res.status(200).json({ result: fixed });
+    // Return raw Assistant output — no linkification.
+    return res.status(200).json({ result: textOut, threadId });
   } catch (err) {
     console.error("/api/chat error:", err);
     return res.status(200).json({ result: "Sorry—something went wrong. Please try again." });
