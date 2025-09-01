@@ -1,13 +1,13 @@
 // pages/api/chat.js
-// Assistants v2 -> get reply text -> rewrite page numbers using linkifyCitations()
-// -> return { result } that contains real <a> tags ready to render.
+// Calls Assistants v2, grabs the text, runs linkifyCitations() to inject correct
+// start pages + <a> links from public/mlb/page_map.json, then returns the result.
 
 import { linkifyCitations } from "../../lib/linkifyCitations";
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
+      return res.status(405).json({ result: "Method not allowed" });
     }
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -34,20 +34,20 @@ export default async function handler(req, res) {
         },
       });
       if (!r.ok) {
-        const t = await r.text().catch(() => "");
-        throw new Error(`HTTP ${r.status} ${r.statusText} — ${t.slice(0, 400)}`);
+        const body = await r.text().catch(() => "");
+        throw new Error(`HTTP ${r.status} ${r.statusText} — ${body.slice(0, 400)}`);
       }
       return r.json();
     };
 
-    // 1) Thread
+    // create thread
     const thread = await j("https://api.openai.com/v1/threads", {
       method: "POST",
       body: JSON.stringify({}),
     });
     const threadId = thread.id;
 
-    // 2) Messages
+    // add messages
     for (const m of messages) {
       const role = m?.role === "assistant" ? "assistant" : "user";
       const content = String(m?.content || "").trim();
@@ -58,51 +58,48 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3) Run assistant
+    // run assistant
     const run = await j(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       body: JSON.stringify({ assistant_id }),
     });
 
-    // 4) Poll (30s cap to keep UX snappy)
-    const waitForRun = async (runId) => {
-      for (let tries = 0; tries < 30; tries++) {
-        await new Promise((r) => setTimeout(r, 1000));
-        const s = await j(
-          `https://api.openai.com/v1/threads/${threadId}/runs/${runId}`,
-          { method: "GET" }
-        );
-        if (s.status === "completed") return;
-        if (["failed", "cancelled", "expired"].includes(s.status)) {
-          throw new Error(`Run ${s.status}`);
-        }
+    // poll up to ~30s
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const s = await j(
+        `https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`,
+        { method: "GET" }
+      );
+      if (s.status === "completed") break;
+      if (["failed", "cancelled", "expired"].includes(s.status)) {
+        throw new Error(`Run ${s.status}`);
       }
-      throw new Error("Run timed out");
-    };
-    await waitForRun(run.id);
+      if (i === 29) throw new Error("Run timed out");
+    }
 
-    // 5) Read latest assistant message
-    const msgList = await j(
-      `https://api.openai.com/v1/threads/${threadId}/messages?limit=20&order=desc`,
+    // read last assistant message
+    const msgs = await j(
+      `https://api.openai.com/v1/threads/${threadId}/messages?order=desc&limit=20`,
       { method: "GET" }
     );
-
-    const firstAssistant = (msgList?.data || []).find((m) => m.role === "assistant");
-    const raw = (firstAssistant?.content || [])
-      .map((c) => (typeof c?.text?.value === "string" ? c.text.value : ""))
-      .join("\n")
-      .trim();
+    const firstAssistant = (msgs?.data || []).find((m) => m.role === "assistant");
+    const raw =
+      (firstAssistant?.content || [])
+        .map((c) => (typeof c?.text?.value === "string" ? c.text.value : ""))
+        .join("\n")
+        .trim() || "";
 
     if (!raw) {
       return res.status(200).json({ result: "No response from assistant." });
     }
 
-    // 6) REWRITE page numbers/links using page_map.json (Article start page only)
+    // IMPORTANT: rewrite PAGE fields using ONLY your map (article start) + add <a> links
     const fixed = linkifyCitations(raw, "/mlb/MLB_CBA_2022.pdf");
 
     return res.status(200).json({ result: fixed });
   } catch (err) {
-    console.error("[/api/chat] error:", err);
+    console.error("/api/chat error:", err);
     return res.status(200).json({ result: "Sorry—something went wrong. Please try again." });
   }
 }
