@@ -1,5 +1,5 @@
-// /pages/api/chat.js
-// Assistants v2 -> get reply -> rewrite ONLY Citation lines using page_map.json -> return { result }
+// pages/api/chat.js
+// Assistants v2 -> get reply -> rewrite ONLY page numbers using page_map.json -> return { result }
 
 import fs from "fs";
 import path from "path";
@@ -12,17 +12,19 @@ export default async function handler(req, res) {
     }
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY on the server." });
+    const assistant_id = process.env.OPENAI_ASSISTANT_ID;
+    if (!OPENAI_API_KEY || !assistant_id) {
+      return res
+        .status(500)
+        .json({ error: "Missing OPENAI_API_KEY or OPENAI_ASSISTANT_ID on the server." });
     }
 
-    const assistant_id = process.env.OPENAI_ASSISTANT_ID || "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
     if (!messages.length) {
       return res.status(400).json({ error: "No question provided." });
     }
 
-    // --- Load page_map.json from the repo (DON'T import from /public; read the file) ---
+    // Load page_map.json from the repo (server-side, no bundler import of JSON)
     let pageMap = {};
     try {
       const pageMapPath = path.join(process.cwd(), "public", "mlb", "page_map.json");
@@ -33,24 +35,24 @@ export default async function handler(req, res) {
     }
 
     const j = async (url, opts) => {
-      const r = await fetch(url, opts);
+      const r = await fetch(url, {
+        ...opts,
+        headers: {
+          ...(opts?.headers || {}),
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+        },
+      });
       if (!r.ok) {
         const t = await r.text().catch(() => "");
-        throw new Error(`HTTP ${r.status} ${r.statusText} — ${t.slice(0, 600)}`);
+        throw new Error(`HTTP ${r.status} ${r.statusText} — ${t.slice(0, 800)}`);
       }
       return r.json();
     };
 
     // 1) Create thread
-    const thread = await j("https://api.openai.com/v1/threads", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2"
-      },
-      body: JSON.stringify({})
-    });
+    const thread = await j("https://api.openai.com/v1/threads", { method: "POST", body: JSON.stringify({}) });
     const threadId = thread.id;
 
     // 2) Seed messages (preserve prior convo)
@@ -61,69 +63,54 @@ export default async function handler(req, res) {
 
       await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "assistants=v2"
-        },
-        body: JSON.stringify({ role, content })
+        body: JSON.stringify({ role, content }),
       });
     }
 
-    // 3) Run the assistant (trust your Platform system prompt)
+    // 3) Run the assistant
     const run = await j(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2"
-      },
-      body: JSON.stringify({ assistant_id })
+      body: JSON.stringify({ assistant_id }),
     });
 
-    // 4) Poll until completed (up to 60s)
-    async function wait(runId) {
+    // 4) Poll until completed (hard cap ~60s)
+    const waitForRun = async (runId) => {
       for (let tries = 0; tries < 60; tries++) {
-        await new Promise(r => setTimeout(r, 1000));
-        const s = await j(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
-          headers: {
-            "Authorization": `Bearer ${OPENAI_API_KEY}`,
-            "OpenAI-Beta": "assistants=v2"
-          }
-        });
+        await new Promise((r) => setTimeout(r, 1000));
+        const s = await j(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, { method: "GET" });
         if (s.status === "completed") return;
         if (["failed", "cancelled", "expired"].includes(s.status)) {
           throw new Error(`Run ${s.status}`);
         }
       }
       throw new Error("Run timed out");
-    }
-    await wait(run.id);
+    };
+    await waitForRun(run.id);
 
     // 5) Read the latest assistant message
-    const msgList = await j(`https://api.openai.com/v1/threads/${threadId}/messages?limit=50&order=desc`, {
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2"
-      }
-    });
+    const msgList = await j(
+      `https://api.openai.com/v1/threads/${threadId}/messages?limit=50&order=desc`,
+      { method: "GET" }
+    );
 
-    const firstAssistant = (msgList?.data || []).find(m => m.role === "assistant");
+    const firstAssistant = (msgList?.data || []).find((m) => m.role === "assistant");
     const raw = (firstAssistant?.content || [])
-      .map(c => (typeof c?.text?.value === "string" ? c.text.value : ""))
+      .map((c) => (typeof c?.text?.value === "string" ? c.text.value : ""))
       .join("\n")
       .trim();
 
     if (!raw) {
+      // Return something the client can show (don’t 500—just say no content)
       return res.status(200).json({ result: "No response from assistant." });
     }
 
-    // 6) Rewrite only Citation lines with the correct PDF pages + markdown links
+    // 6) Rewrite page numbers/links from mapping (single source of truth)
     const fixed = linkifyCitationsWithMap(raw, pageMap, "/mlb/MLB_CBA_2022.pdf");
 
     return res.status(200).json({ result: fixed });
   } catch (err) {
-    console.error("[chat] error:", err);
+    console.error("[/api/chat] error:", err);
+    // 200 with a message so the embed UI can show it inline (keeps UX consistent)
     return res.status(200).json({ result: "Sorry—something went wrong. Please try again." });
   }
 }
