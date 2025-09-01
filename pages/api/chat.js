@@ -1,120 +1,53 @@
-// /pages/api/chat.js
-import { linkifyCitations } from "../../lib/linkifyCitations"; // ✅ relative path
+import { Configuration, OpenAIApi } from "openai";
+import { resolvePageNumber } from "@/lib/resolvePageNumber";
 
+// Ensure API key is set
+const configuration = new Configuration({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+const openai = new OpenAIApi(configuration);
+
+// Main API handler
 export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
-    }
-
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY on the server." });
-    }
-
-    // ✅ Assistant ID from OpenAI platform
-    const assistant_id = "asst_O7Gb2VAnxmHP2Bd5Gu3Utjf2";
-
-    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
-    if (!messages.length) {
-      return res.status(400).json({ error: "No question provided." });
-    }
-
-    // helper to call OpenAI REST endpoints
-    async function j(url, opts) {
-      const r = await fetch(url, opts);
-      if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text().catch(()=>"")}`);
-      return r.json();
-    }
-
-    // 1) Create a thread
-    const thread = await j("https://api.openai.com/v1/threads", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-      },
-      body: JSON.stringify({})
-    });
-    const threadId = thread.id;
-
-    // 2) Add user messages
-    for (const m of messages) {
-      const role = (m?.role === "assistant") ? "assistant" : "user";
-      const content = (m?.content || "").toString().trim();
-      if (!content) continue;
-
-      await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "assistants=v2",
-        },
-        body: JSON.stringify({ role, content })
-      });
-    }
-
-    // 3) Run the Assistant (trust platform system prompt)
-    const run = await j(`https://api.openai.com/v1/threads/${threadId}/runs`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-      },
-      body: JSON.stringify({ assistant_id })
-    });
-
-    // 4) Poll until completed
-    async function wait(runId) {
-      let tries = 0;
-      while (tries < 60) {
-        await new Promise(r => setTimeout(r, 1000));
-        const s = await j(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
-          headers: {
-            "Authorization": `Bearer ${OPENAI_API_KEY}`,
-            "OpenAI-Beta": "assistants=v2"
-          }
-        });
-        if (s.status === "completed") return;
-        if (["failed", "cancelled", "expired"].includes(s.status)) {
-          throw new Error(`Run ${s.status}`);
-        }
-        tries++;
-      }
-      throw new Error("Run timed out");
-    }
-    await wait(run.id);
-
-    // 5) Get the latest assistant message text
-    const msgs = await j(`https://api.openai.com/v1/threads/${threadId}/messages`, {
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2"
-      }
-    });
-
-    const assistantMsg = msgs?.data?.find(m => m.role === "assistant");
-    let raw = "";
-
-    if (assistantMsg?.content?.length) {
-      raw = assistantMsg.content
-        .filter(part => part.type === "text" && part.text?.value)
-        .map(part => part.text.value)
-        .join("\n\n")
-        .trim();
-    }
-
-    if (!raw) raw = "The assistant returned an empty response.";
-
-    // 6) Only linkify “Page N — Open page”
-    const result = linkifyCitations(raw);
-
-    return res.status(200).json({ result });
-  } catch (e) {
-    console.error("[/api/chat] ERROR:", e?.message || e);
-    return res.status(500).json({ error: "Internal error" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
+
+  try {
+    const { messages } = req.body;
+
+    // Call OpenAI
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      temperature: 0,
+    });
+
+    let output = completion.choices[0].message.content;
+
+    // Post-process citations to swap in correct page numbers
+    output = linkifyCitations(output);
+
+    return res.status(200).json({ result: output });
+  } catch (err) {
+    console.error("Error in chat handler:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * Replace Assistant-supplied citations with trusted PDF links
+ */
+function linkifyCitations(text) {
+  const citationRegex =
+    /CBA \(2022–2026\), Article ([A-Za-z0-9().–]+)(?:; Page \d+)?/g;
+
+  return text.replace(citationRegex, (match, articleKey) => {
+    const page = resolvePageNumber(`Article ${articleKey}`);
+    if (page) {
+      return `CBA (2022–2026), Article ${articleKey}; Page ${page} — <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Open page</a>`;
+    }
+    // fallback: keep the original if no mapping
+    return match;
+  });
 }
