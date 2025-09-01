@@ -6,11 +6,8 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Helper: try to resolve page number for a quoted excerpt
 function resolvePageNumber(quote) {
   if (!quote) return null;
-
-  // search values of pageMap for exact substring match
   for (const [section, page] of Object.entries(pageMap)) {
     if (quote.includes(section)) {
       return page;
@@ -21,8 +18,7 @@ function resolvePageNumber(quote) {
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
@@ -40,9 +36,13 @@ export default async function handler(req, res) {
       ],
     });
 
-    let text = completion.choices[0].message.content;
+    // Robustly extract assistant reply
+    let text =
+      completion.choices?.[0]?.message?.content ||
+      completion.choices?.[0]?.text ||
+      "No response from model.";
 
-    // Try to inject PDF links based on page_map.json
+    // Add PDF links to "Page X" mentions
     text = text.replace(/Page (\d+)/g, (match, p1) => {
       const page = parseInt(p1, 10);
       if (!isNaN(page)) {
@@ -51,21 +51,21 @@ export default async function handler(req, res) {
       return match;
     });
 
-    // Additionally check LEGAL_EXCERPTS quotes for mapping
-    text = text.replace(
-      /QUOTE: "(.*?)"/g,
-      (match, quote) => {
-        const page = resolvePageNumber(quote);
-        if (page) {
-          return `QUOTE: "${quote}" (See <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Page ${page}</a>)`;
-        }
-        return match;
+    // Add PDF links to legal quotes
+    text = text.replace(/QUOTE: "(.*?)"/g, (match, quote) => {
+      const page = resolvePageNumber(quote);
+      if (page) {
+        return `QUOTE: "${quote}" (See <a href="/mlb/MLB_CBA_2022.pdf#page=${page}" target="_blank" rel="noopener noreferrer">Page ${page}</a>)`;
       }
-    );
+      return match;
+    });
 
-    res.status(200).json({ output: text });
+    return res.status(200).json({ output: text });
   } catch (err) {
     console.error("Chat API error:", err);
-    res.status(500).json({ error: "Something went wrong." });
+    return res.status(200).json({
+      output:
+        "Sorry—something went wrong with the assistant. Please try again.",
+    });
   }
 }
