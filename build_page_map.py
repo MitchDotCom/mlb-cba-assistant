@@ -2,7 +2,7 @@ import json
 import re
 
 # Load the page-by-page text (generated already from PDF)
-with open("cba_pages.json", "r") as f:
+with open("public/mlb/cba_pages.json", "r") as f:
     cba_pages = json.load(f)
 
 # Regex patterns — catch ARTICLE, APPENDIX, ATTACHMENT anywhere in the line
@@ -47,7 +47,7 @@ for i, (line, start_page) in enumerate(entries):
     }
 
 # Save output
-with open("page_map.json", "w") as f:
+with open("public/mlb/page_map.json", "w") as f:
     json.dump(page_map, f, indent=2)
 
 print(f"Built page_map.json with {len(page_map)} entries")
