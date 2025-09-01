@@ -1,5 +1,5 @@
 import { Configuration, OpenAIApi } from "openai";
-import { resolvePageNumber } from "@/lib/resolvePageNumber";
+import { resolvePageNumber } from "../../lib/resolvePageNumber.js";
 
 // Ensure API key is set
 const configuration = new Configuration({
